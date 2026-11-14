@@ -1,0 +1,4 @@
+# 엔진이 자동 생성하는 에디터용 타입(로드 시 재생성됨, 대용량) — 커밋 안 함
+.claude-plugin/types/
+node_modules/
+.DS_Store

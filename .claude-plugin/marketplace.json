@@ -1,0 +1,12 @@
+{
+  "name": "leejuyeon",
+  "owner": { "name": "Lee-JuYeon", "url": "https://github.com/Lee-JuYeon" },
+  "description": "Lee-JuYeon's Claude Code plugins",
+  "plugins": [
+    {
+      "name": "problem-tree",
+      "source": ".",
+      "description": "미해결 문제를 노드트리로 추적하는 터미널 패널 — 끝난 건 사라지고 '아직 할 일'만 남는다"
+    }
+  ]
+}

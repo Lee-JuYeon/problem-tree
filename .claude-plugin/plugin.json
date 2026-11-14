@@ -1,0 +1,11 @@
+{
+  "name": "problem-tree",
+  "version": "0.1.0",
+  "description": "세션을 넘어 살아남는 미해결 문제 DAG 패널 — 문제가 잊히는 것을 막는다",
+  "author": { "name": "Lee-JuYeon", "url": "https://github.com/Lee-JuYeon" },
+  "homepage": "https://github.com/Lee-JuYeon/problem-tree",
+  "repository": "https://github.com/Lee-JuYeon/problem-tree",
+  "license": "MIT",
+  "keywords": ["panel", "tui", "problem-tracking", "node-tree", "dag"],
+  "types": "./types/index.d.ts"
+}
