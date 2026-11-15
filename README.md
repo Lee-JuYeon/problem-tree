@@ -35,8 +35,8 @@ Claude Code 세션 옆에 상주하는 **문제해결 노드트리** 패널. 긴
 ## 쓰는 법
 
 - 패널 열기: `/ptree`
-- 커맨드: `/ptree add <제목>` · `resolve <id>` · `reopen <id>` · `focus <id>` · `rename <id> <제목>` · `rm <id>` · `note <id> <글>` · `show`(완료 노드 표시 토글) · `list`
-- Claude 자동 도구: `add_problem`(새 문제를 '계획만'으로 추가, focus는 안 뺏음) · `focus_problem`(지금부터 이 노드 작업 선언 → 진행중) · `resolve_problem`(근거 있을 때 해결, 같이 풀린 건 `alsoResolves`) · `reopen_problem` · `rename_problem` · `list_problems`
+- 커맨드: `/ptree add <제목>` · `resolve <id>` · `reopen <id>` · `focus <id>` · `rename <id> <제목>` · `rm <id>` · `move <id> [부모id]`(생략=루트로) · `note <id> <글>` · `show`(완료 노드 표시 토글) · `list`
+- Claude 자동 도구: `add_problem`(새 문제를 '계획만'으로 추가, focus는 안 뺏음. `parentId` 생략=루트, 하위 문제면 `parentId` 명시) · `move_problem`(잘못 붙은 노드를 다른 부모/루트로 옮김, 하위 노드 동행) · `focus_problem`(지금부터 이 노드 작업 선언 → 진행중) · `resolve_problem`(근거 있을 때 해결, 같이 풀린 건 `alsoResolves`) · `reopen_problem` · `rename_problem` · `list_problems`
 
 ## 제목 규칙(철칙)
 

@@ -2,7 +2,7 @@ export type PtreeStatus = 'open' | 'resolved'
 
 export type PtreeHistory = {
   at: number
-  event: 'add' | 'resolve' | 'reopen' | 'merge' | 'focus' | 'note' | 'rename'
+  event: 'add' | 'resolve' | 'reopen' | 'merge' | 'focus' | 'note' | 'rename' | 'move'
   by: 'user' | 'claude'
   ref?: string
 }
@@ -53,5 +53,6 @@ declare module 'claude-code' {
     'mcp__problem-tree__rename_problem': { nodeId: string; title: string }
     'mcp__problem-tree__focus_problem': { nodeId: string }
     'mcp__problem-tree__list_problems': {}
+    'mcp__problem-tree__move_problem': { nodeId: string; newParentId?: string }
   }
 }

@@ -35,7 +35,9 @@ const resolveParent = (t: PtreeTree, want?: string): string | undefined => (want
 
 function addNode(t: PtreeTree, title: string, by: 'user' | 'claude', at: number, opts?: { parent?: string }): PtreeNode {
   const id = 'n' + ++t.seq
-  const parent = resolveParent(t, opts?.parent ?? t.focusId)
+  // 사용자(/ptree add)는 지금 focus 밑에 잇는다. Claude는 focus를 상속하지 않는다:
+  // parentId 생략 = 루트(독립 문제). 숨은 상태(focusId)에 따라 붙는 자리가 달라지면 안 됨.
+  const parent = resolveParent(t, by === 'user' ? (opts?.parent ?? t.focusId) : opts?.parent)
   const node: PtreeNode = {
     id,
     title: title.slice(0, TITLE_MAX),
@@ -105,6 +107,65 @@ function doRemove(t: PtreeTree, id: string) {
   if (t.focusId === id) t.focusId = undefined
 }
 
+// id를 newParent 밑에 달면 순환이 되는가. newParent에서 부모를 타고 올라가다 id를 만나면 순환.
+// newParent === id(자기 자신)도 여기서 잡힌다. 이미 순환인 사슬 밑으로도 못 단다(방문집합으로 멈춤).
+function wouldCycle(t: PtreeTree, id: string, newParent?: string): boolean {
+  const seen = new Set<string>()
+  let cur = newParent
+  while (cur !== undefined && t.nodes[cur]) {
+    if (cur === id || seen.has(cur)) return true
+    seen.add(cur)
+    cur = t.nodes[cur]?.parent
+  }
+  return false
+}
+
+// 이동 거부 사유(없으면 undefined). 최종 판정은 doMove가 쓰기 시점 트리로 내린다 —
+// 핸들러의 사전 호출은 빠른 거부(쓸데없는 저장 방지) 전용이다.
+function moveError(t: PtreeTree, id: string, newParent?: string): string | undefined {
+  const n = t.nodes[id]
+  if (!n) return `없는 노드: ${id}`
+  if (newParent !== undefined && !t.nodes[newParent]) return `없는 부모: ${newParent} — 목록으로 확인(루트로 보내려면 부모 id를 생략)`
+  if (newParent === id) return `거부: ${id}를 자기 자신 밑으로 옮길 수 없음`
+  if (wouldCycle(t, id, newParent)) return `거부: ${newParent}는 ${id}의 하위 노드 — 순환이 됨`
+  if (n.parent === newParent) return `변화 없음: ${id}는 이미 ${newParent ? '부모 ' + newParent : '루트'}`
+  return undefined
+}
+
+// 서브트리째 옮긴다(자식의 parent는 그대로 → 따라옴). 구조 편집이라 focus·touchedAt은 안 건드림.
+// 반환 = 실제로 일어난 일의 문구. 쓰기 시점 트리로 다시 판정하므로(같은 턴의 다른 호출이 먼저
+// 트리를 바꿨을 수 있다) 호출자는 사전 판정이 아니라 이 반환값을 그대로 사용자/모델에게 돌려준다.
+function doMove(t: PtreeTree, id: string, newParent: string | undefined, at: number, by: 'user' | 'claude'): string {
+  const err = moveError(t, id, newParent)
+  const n = t.nodes[id]
+  if (err || !n) return err ?? `없는 노드: ${id}`
+  n.parent = newParent
+  log(n, at, 'move', by, newParent)
+  const willPrune = newParent === undefined && n.status === 'resolved' ? ' (하위까지 전부 완료면 다음 턴 시작 때 정리됨)' : ''
+  return `이동 ${id} → ${newParent ? '부모 ' + newParent : '루트'}${willPrune}`
+}
+
+// 부모 링크 정리: ①없는 노드를 가리키는 parent → 루트로 ②순환 → 끊는다(순환에 낀 노드를 루트로).
+// ①을 두면 화면엔 루트로 보이다가 나중에 그 id의 노드가 생기면 그 밑으로 딸려 들어간다.
+// ②는 패널에서 노드를 숨기고 pruneDone 재귀를 터뜨린다(스택 초과 → 훅 skip).
+// 정상 트리에선 아무것도 안 바꾼다.
+function repairParents(t: PtreeTree) {
+  for (const n of Object.values(t.nodes)) if (n.parent !== undefined && !t.nodes[n.parent]) n.parent = undefined
+  for (const n of Object.values(t.nodes)) {
+    const seen = new Set<string>([n.id])
+    let cur = n.parent
+    while (cur !== undefined && t.nodes[cur]) {
+      if (cur === n.id) {
+        n.parent = undefined
+        break
+      }
+      if (seen.has(cur)) break // n이 끼지 않은 순환 — 그 노드 차례에 끊긴다
+      seen.add(cur)
+      cur = t.nodes[cur]?.parent
+    }
+  }
+}
+
 // ---------- staleness / pruning / layout ----------
 
 const staleDays = (n: PtreeNode, now: number) => Math.floor((now - n.touchedAt) / DAY)
@@ -116,6 +177,7 @@ type Row = { node: PtreeNode; prefix: string; last: boolean; depth: number }
 // - 열린 조상 밑의 "완료 가지"(그 노드+자손 전부 resolved) → 자손만 지우고 노드는 ● 한 줄로 접음
 // 부모 자동완료는 안 함(부모도 문제 본체). rejected는 안 건드림(같은 제목 재추가 가능).
 function pruneDone(t: PtreeTree) {
+  repairParents(t) // 아래 재귀는 순환·끊긴 부모 없는 트리를 전제한다
   const nodes = t.nodes
   const childrenOf = (id: string) => Object.values(nodes).filter(n => n.parent === id)
   const fullyResolved = (id: string): boolean => {
@@ -231,18 +293,18 @@ export const register: Register = on => {
     await $.command.register({
       name: 'ptree',
       description: '문제해결 노드트리 패널',
-      argumentHint: '[add <제목> | resolve <id> | reopen <id> | focus <id> | rename <id> <제목> | rm <id> | note <id> <글> | list]',
+      argumentHint: '[add <제목> | resolve <id> | reopen <id> | focus <id> | rename <id> <제목> | rm <id> | move <id> [부모id] | note <id> <글> | list]',
     })
     await $.tool.register({
       name: 'add_problem',
       description:
-        '대화에서 새 문제·버그·미결 질문·"나중에 할 일"이 나왔고 지금 작업과 별개 단위면 노드를 추가한다(바로 "계획만" 상태로 들어감, focus는 안 뺏음). 지금 바로 고치는 한 줄 수정은 넣지 말 것. ★제목 철칙: 쉬운 말로 요약, 되도록 10자·최대 16자, 직관적이고 가독성 높게(16자 넘으면 거부됨).',
+        '대화에서 새 문제·버그·미결 질문·"나중에 할 일"이 나왔고 지금 작업과 별개 단위면 노드를 추가한다(바로 "계획만" 상태로 들어감, focus는 안 뺏음). ★자리: parentId 생략 = 루트(독립 문제). 지금 작업 중인 노드에서 갈라진 하위 문제면 parentId를 반드시 준다(자동으로 안 붙음). 지금 바로 고치는 한 줄 수정은 넣지 말 것. ★제목 철칙: 쉬운 말로 요약, 되도록 10자·최대 16자, 직관적이고 가독성 높게(16자 넘으면 거부됨).',
       isDeferred: false,
       inputSchema: {
         type: 'object',
         properties: {
           title: { type: 'string', description: '문제를 한 줄로(16자 이내, 짧고 명확)' },
-          parentId: { type: 'string', description: '갈라져 나온 부모 노드 id(있으면)' },
+          parentId: { type: 'string', description: '부모 노드 id. 생략하면 루트. 없는 id면 거부됨' },
         },
         required: ['title'],
       },
@@ -285,6 +347,20 @@ export const register: Register = on => {
       description: '현재 문제 노드 목록(id·상태·방치일수·부모)을 반환한다. 다른 도구를 쓰기 전에 nodeId를 알려면 먼저 호출한다.',
       isDeferred: false,
       inputSchema: { type: 'object', properties: {} },
+    })
+    await $.tool.register({
+      name: 'move_problem',
+      description:
+        '노드를 다른 부모 밑으로(또는 루트로) 옮긴다. 하위 노드는 함께 따라간다. 잘못 붙은 노드는 resolve+재생성하지 말고 이걸로 고친다. newParentId 생략 = 루트. 자기 자신·자기 하위 노드 밑으로는 못 옮긴다.',
+      isDeferred: false,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          nodeId: { type: 'string', description: '옮길 노드 id' },
+          newParentId: { type: 'string', description: '새 부모 id. 생략하면 루트로. 없는 id면 거부됨' },
+        },
+        required: ['nodeId'],
+      },
     })
 
     // cross-session store → atom 시드 (+ 구버전 proposed 노드 마이그레이션)
@@ -392,6 +468,16 @@ export const register: Register = on => {
       await apply($, t => doRemove(t, rest))
       return { text: `삭제: ${rest}` }
     }
+    if (sub === 'move' && rest) {
+      const [id = '', to] = rest.split(/\s+/)
+      const err = moveError(await read($, treeAtom), id, to)
+      if (err) return { text: err }
+      let done = ''
+      await apply($, (t, at) => {
+        done = doMove(t, id, to, at, 'user')
+      })
+      return { text: done }
+    }
     if (sub === 'note' && rest) {
       const s2 = rest.indexOf(' ')
       const id = s2 === -1 ? rest : rest.slice(0, s2)
@@ -427,11 +513,27 @@ export const register: Register = on => {
     const dup = Object.values(t0.nodes).find(n => n.status !== 'resolved' && norm(n.title) === nn)
     if (dup) return { result: `중복: 이미 ${dup.id} 로 존재(무시됨)` }
     if (t0.rejected.includes(nn)) return { result: `전에 삭제된 제목(무시됨)` }
-    let newId = ''
+    if (parentId && !t0.nodes[parentId]) return { result: `없는 부모: ${parentId} — 추가 안 됨. list_problems로 확인(루트면 parentId 생략)` }
+    let out = ''
     await apply($, (t, at) => {
-      newId = addNode(t, title, 'claude', at, { parent: parentId }).id
+      // 쓰기 시점 재검사(apply는 직렬화 → 같은 제목 병렬 add도 하나만 통과, 선재 틈 차단)
+      const d = Object.values(t.nodes).find(n => n.status !== 'resolved' && norm(n.title) === nn)
+      if (d) {
+        out = `중복: 이미 ${d.id} 로 존재(무시됨)`
+        return
+      }
+      if (t.rejected.includes(nn)) {
+        out = `전에 삭제된 제목(무시됨)`
+        return
+      }
+      if (parentId && !t.nodes[parentId]) {
+        out = `없는 부모: ${parentId} — 추가 안 됨. list_problems로 확인(루트면 parentId 생략)`
+        return
+      }
+      const node = addNode(t, title, 'claude', at, { parent: parentId })
+      out = `추가 ${node.id}(계획만 ○, ${node.parent ? '부모 ' + node.parent : '루트'}) — focus는 그대로`
     })
-    return { result: `추가 ${newId}(계획만 ○) — focus는 그대로` }
+    return { result: out }
   })
 
   on('tool.call', { tool: 'mcp__problem-tree__resolve_problem' }, async ($, e) => {
@@ -491,6 +593,18 @@ export const register: Register = on => {
     return { result: `이름 변경 ${id}: ${title}` }
   })
 
+  on('tool.call', { tool: 'mcp__problem-tree__move_problem' }, async ($, e) => {
+    const id = str((e as any).nodeId)
+    const to = str((e as any).newParentId) || undefined
+    const err = moveError(await read($, treeAtom), id, to) // 빠른 거부
+    if (err) return { result: err }
+    let done = ''
+    await apply($, (t, at) => {
+      done = doMove(t, id, to, at, 'claude') // 쓰기 시점 판정 = 실제 결과
+    })
+    return { result: done }
+  })
+
   on('tool.call', { tool: 'mcp__problem-tree__list_problems' }, async ($, _e) => {
     const t = await read($, treeAtom)
     const ui = await read($, uiAtom)
@@ -535,7 +649,7 @@ export const register: Register = on => {
                 {`${branch}${stale ? '⚠' : ''}${marker}`}
               </Text>
               <Text dimColor={resolved} weight={current ? 'semibold' : undefined} wrap="truncate-end" color={current ? 'claude' : undefined}>
-                {`${n.id} ${n.title}`.slice(0, titleW)}
+                {n.title.slice(0, titleW)}
               </Text>
             </Box>
           )

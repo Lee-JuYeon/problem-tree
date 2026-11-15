@@ -73,7 +73,7 @@ const call = ($: Engine, tool: string, input: Record<string, unknown>) =>
 const turnStart = ($: Engine, turnId = 't1', agentId?: string) =>
   ($ as any).turn.start({ text: 'x', turnId, ...(agentId ? { agentId } : {}) })
 const turnDone = ($: Engine, turnId = 't1', agentId?: string) =>
-  ($ as any).turn.complete({ turnId, reason: 'answer', ...(agentId ? { agentId } : {}) })
+  ($ as any).turn.complete({ turnId, reason: 'answer', answer: '', durationMs: 0, isAborted: false, ...(agentId ? { agentId } : {}) })
 
 // ---------- 1. add (user) ----------
 
@@ -241,7 +241,7 @@ test('a saved tree seeds the atom; legacy proposed nodes migrate to open', OPTS,
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal', viewport: VP })
   // n1은 3일 방치 → stale 접두(⚠), 둘 다 계획만 ○
   expect(await ui.find({ type: 'Text', text: /⚠○/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /n1 옛 문제/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^옛 문제$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /├─|└─/ })).toBeDefined()
   await ui.unmount()
 
@@ -271,8 +271,8 @@ test('a resolved parent with an open child survives (tree not fully done)', OPTS
   expect(t.nodes['n1']?.status).toBe('resolved') // 부모는 완료됐지만
   expect(t.nodes['n2']?.status).toBe('open') // 열린 자식이 있어 나무가 안 지워짐(부모 자동완료 안 함)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal', viewport: VP })
-  expect(await ui.find({ type: 'Text', text: /n1 부모/ })).toBeDefined() // 하루 숨김 로직 없음 — 그냥 보임
-  expect(await ui.find({ type: 'Text', text: /n2 자식/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^부모$/ })).toBeDefined() // 하루 숨김 로직 없음 — 그냥 보임
+  expect(await ui.find({ type: 'Text', text: /^자식$/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -300,7 +300,7 @@ test('the pane still draws at a narrow width and truncates titles', OPTS, async 
   await run($, 'add 아주아주아주아주아주 긴제목') // 16자로 잘림
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface, viewport: { columns: 20, rows: 10 } })
-    const row = await ui.find({ type: 'Text', text: /^n1 / })
+    const row = await ui.find({ type: 'Text', text: /^아주/ })
     expect(row).toBeDefined()
     expect(row?.text.length).toBe(10) // titleW = max(10, 20-16)
     await ui.unmount()
@@ -315,7 +315,7 @@ test('the pane is read-only: no add/toggle/resolve/focus buttons', OPTS, async (
   await run($, 'add A')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal', viewport: VP })
   // 노드는 보이되, 어떤 조작 버튼/입력도 없어야 한다(관리는 커맨드·AI가)
-  expect(await ui.find({ type: 'Text', text: /^n1 / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^A$/ })).toBeDefined()
   expect(await ui.find({ key: 'add' })).toBeUndefined()
   expect(await ui.find({ key: 'toggle' })).toBeUndefined()
   expect(await ui.find({ key: 'resolve:n1' })).toBeUndefined()
@@ -337,14 +337,14 @@ test('a fully-resolved tree is pruned at the next turn start, not immediately', 
   // B: resolve 즉시 삭제 안 함 — 이 턴 동안 ●로 남아 reopen 여지
   expect((await tree($)).nodes['n1']?.status).toBe('resolved')
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal', viewport: VP })
-  expect(await ui.find({ type: 'Text', text: /^n1 / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^A$/ })).toBeDefined()
   await ui.unmount()
   // 다음 메인 턴 시작 → 완료된 단독 루트 삭제
   await turnStart($)
   expect((await tree($)).nodes['n1']).toBeUndefined()
   await turnDone($)
   ui = await $.ui.mount({ ...PANE, surface: 'terminal', viewport: VP })
-  expect(await ui.find({ type: 'Text', text: /^n1 / })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^A$/ })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -537,3 +537,249 @@ test('a node worked across turns keeps a fresh touchedAt (not stale)', OPTS, asy
   await ui.unmount()
   await turnDone($)
 })
+
+
+// ---------- 20. add_problem 자리: 생략=루트, 명시=자식, 없는 부모=거부 ----------
+
+test('add_problem without parentId is a root even when a node is focused', OPTS, async ($, on) => {
+  boot(on)
+  await start($)
+  await call($, 'add_problem', { title: 'A' }) // n1
+  await call($, 'focus_problem', { nodeId: 'n1' })
+  const r = await call($, 'add_problem', { title: 'B' })
+  expect(r.result).toContain('추가 n2')
+  expect(r.result).toContain('루트')
+  const t = await tree($)
+  expect(t.nodes['n2']?.parent).toBeUndefined() // focus(n1)를 상속하지 않는다
+  expect(t.focusId).toBe('n1')
+})
+
+test('add_problem with parentId attaches there; an unknown parentId is refused', OPTS, async ($, on) => {
+  boot(on)
+  await start($)
+  await call($, 'add_problem', { title: 'A' }) // n1
+  const ok = await call($, 'add_problem', { title: 'B', parentId: 'n1' })
+  expect(ok.result).toContain('추가 n2')
+  expect(ok.result).toContain('부모 n1')
+  expect((await tree($)).nodes['n2']?.parent).toBe('n1')
+
+  for (const bad of ['n99', 'root']) {
+    const r = await call($, 'add_problem', { title: 'C', parentId: bad })
+    expect(r.result).toContain('없는 부모')
+  }
+  const t = await tree($)
+  expect(Object.keys(t.nodes)).toEqual(['n1', 'n2']) // 조용히 루트로 만들지 않는다
+  expect(t.seq).toBe(2) // id 낭비 없음
+})
+
+// ---------- 21. move_problem ----------
+
+test('move_problem moves a subtree; focus and touchedAt stay; persisted', OPTS, async ($, on) => {
+  const { clock, store } = boot(on)
+  await start($)
+  await run($, 'add 조부') // n1
+  await run($, 'add 부모') // n2 under n1
+  await run($, 'add 자식') // n3 under n2, focus n3
+  await clock.advance(5000)
+
+  const r = await call($, 'move_problem', { nodeId: 'n2' }) // 생략 = 루트
+  expect(r.result).toContain('이동 n2')
+  expect(r.result).toContain('루트')
+  let t = await tree($)
+  expect(t.nodes['n2']?.parent).toBeUndefined()
+  expect(t.nodes['n3']?.parent).toBe('n2') // 하위는 따라온다
+  expect(t.focusId).toBe('n3')
+  expect(t.nodes['n2']?.touchedAt).toBe(T0) // 구조 편집은 방치 시계를 안 건드림
+  expect(t.nodes['n2']?.history.at(-1)).toMatchObject({ event: 'move', by: 'claude' })
+  expect(stored(store)?.nodes['n2']?.parent).toBeUndefined()
+
+  const r2 = await call($, 'move_problem', { nodeId: 'n1', newParentId: 'n3' }) // 조부를 손자 밑으로(이제 순환 아님)
+  expect(r2.result).toContain('부모 n3')
+  t = await tree($)
+  expect(t.nodes['n1']?.parent).toBe('n3')
+  expect(t.nodes['n1']?.history.at(-1)).toMatchObject({ event: 'move', ref: 'n3' })
+})
+
+test('move_problem refuses self, descendants, unknown ids and no-ops; tree unchanged', OPTS, async ($, on) => {
+  boot(on)
+  await start($)
+  await run($, 'add A') // n1
+  await run($, 'add B') // n2 under n1
+  await run($, 'add C') // n3 under n2
+  const before = await tree($)
+
+  expect((await call($, 'move_problem', { nodeId: 'n9' })).result).toContain('없는 노드')
+  expect((await call($, 'move_problem', { nodeId: 'n3', newParentId: 'n9' })).result).toContain('없는 부모')
+  expect((await call($, 'move_problem', { nodeId: 'n2', newParentId: 'n2' })).result).toContain('자기 자신')
+  expect((await call($, 'move_problem', { nodeId: 'n1', newParentId: 'n3' })).result).toContain('순환')
+  expect((await call($, 'move_problem', { nodeId: 'n1', newParentId: 'n2' })).result).toContain('순환')
+  expect((await call($, 'move_problem', { nodeId: 'n3', newParentId: 'n2' })).result).toContain('변화 없음')
+  expect((await call($, 'move_problem', { nodeId: 'n1' })).result).toContain('변화 없음')
+
+  expect(await tree($)).toEqual(before)
+})
+
+test('move_problem works on resolved nodes; a moved done tree prunes at the next turn', OPTS, async ($, on) => {
+  boot(on)
+  await start($)
+  await run($, 'add 부모') // n1
+  await run($, 'add 자식') // n2 under n1
+  await call($, 'add_problem', { title: '다른일' }) // n3 root
+  await run($, 'resolve n2')
+  // 열린 노드를 완료된 노드 밑으로 — 허용(완료 부모 + 열린 자식은 원래 있는 모양)
+  expect((await call($, 'move_problem', { nodeId: 'n3', newParentId: 'n2' })).result).toContain('부모 n2')
+  await turnStart($)
+  await turnDone($)
+  let t = await tree($)
+  expect(t.nodes['n2']?.status).toBe('resolved') // 열린 자식이 있어 안 접힘
+  expect(t.nodes['n3']?.parent).toBe('n2')
+  // 완료 노드를 루트로 — 다음 턴 시작 때 완료된 나무로 정리된다
+  await call($, 'move_problem', { nodeId: 'n3' })
+  const r = await call($, 'move_problem', { nodeId: 'n2' })
+  expect(r.result).toContain('다음 턴')
+  await turnStart($)
+  await turnDone($)
+  t = await tree($)
+  expect(t.nodes['n2']).toBeUndefined()
+  expect(Object.keys(t.nodes).sort()).toEqual(['n1', 'n3'])
+})
+
+test('/ptree move reparents and roots; refusals are reported', OPTS, async ($, on) => {
+  boot(on)
+  await start($)
+  await run($, 'add A') // n1
+  await run($, 'add B') // n2 under n1
+  expect((await run($, 'move n2'))?.text).toContain('루트')
+  expect((await tree($)).nodes['n2']?.parent).toBeUndefined()
+  expect((await run($, 'move n1 n2'))?.text).toContain('부모 n2')
+  const t = await tree($)
+  expect(t.nodes['n1']?.parent).toBe('n2')
+  expect(t.nodes['n1']?.history.at(-1)).toMatchObject({ event: 'move', by: 'user', ref: 'n2' })
+  expect((await run($, 'move n2 n1'))?.text).toContain('순환')
+  expect((await run($, 'move n7'))?.text).toContain('없는 노드')
+})
+
+// ---------- 22. 저장 트리의 순환: 끊고 살아남는다 ----------
+
+test('a saved tree with a parent cycle is repaired at load (no hook skip, nodes visible)', OPTS, async ($, on) => {
+  const mk = (id: string, parent: string | undefined, status: string) => ({ id, title: id, status, parent, createdAt: T0, touchedAt: T0, reopenCount: 0, history: [] })
+  const { store } = boot(on, {
+    [KEY]: {
+      version: 1,
+      seq: 5,
+      rejected: [],
+      nodes: {
+        n1: mk('n1', 'n2', 'open'),
+        n2: mk('n2', 'n1', 'open'),
+        n3: mk('n3', 'n1', 'open'), // 순환에 매달린 노드 — 부모 유지
+        n4: mk('n4', 'n5', 'resolved'),
+        n5: mk('n5', 'n4', 'resolved'), // 완료 순환 — 예전엔 스택 초과
+      },
+    },
+  })
+  await start($)
+  const t = await tree($)
+  expect(t).not.toBeNull() // session.start 훅이 skip되지 않았다
+  expect(t.nodes['n1']?.parent).toBeUndefined() // 순환이 끊김
+  expect(t.nodes['n2']?.parent).toBe('n1')
+  expect(t.nodes['n3']?.parent).toBe('n1')
+  expect(t.nodes['n4']).toBeUndefined() // 끊긴 뒤 완료 나무로 정리
+  expect(t.nodes['n5']).toBeUndefined()
+  expect(stored(store)?.nodes['n1']?.parent).toBeUndefined()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', viewport: VP })
+  for (const id of ['n1', 'n2', 'n3']) expect(await ui.find({ type: 'Text', text: new RegExp(`^${id}$`) })).toBeDefined()
+  await ui.unmount()
+  await turnStart($) // 매 턴 프루닝도 안 터진다
+  await turnDone($)
+  expect(Object.keys((await tree($)).nodes).sort()).toEqual(['n1', 'n2', 'n3'])
+})
+
+// ---------- 23. 실시간 반영: 상태 쓰기만으로 열린 패널이 다시 그려진다 ----------
+
+test('an open pane redraws on a tool write with no explicit redraw (main, subagent, narrow)', OPTS, async ($, on) => {
+  boot(on)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', viewport: { columns: 20, rows: 10 } })
+  expect(await ui.find({ type: 'Text', text: /없습니다/ })).toBeDefined()
+  await call($, 'add_problem', { title: '턴밖' })
+  expect(await ui.find({ type: 'Text', text: /^턴밖$/ })).toBeDefined()
+  await turnStart($)
+  await call($, 'add_problem', { title: '턴중' })
+  expect(await ui.find({ type: 'Text', text: /^턴중$/ })).toBeDefined()
+  await call($, 'add_problem', { title: '서브', agentId: 'agent-7' }) // 서브에이전트 루프의 호출
+  expect(await ui.find({ type: 'Text', text: /^서브$/ })).toBeDefined()
+  await call($, 'move_problem', { nodeId: 'n3', newParentId: 'n1' })
+  expect(await ui.find({ type: 'Text', text: /└─○/ })).toBeDefined()
+  await call($, 'rename_problem', { nodeId: 'n2', title: '바뀜' })
+  expect(await ui.find({ type: 'Text', text: /^바뀜$/ })).toBeDefined()
+  await turnDone($)
+  await ui.unmount()
+})
+
+// ---------- 24. 병렬 상충 move: 한쪽만 적용, 문구는 실제 결과 ----------
+
+test('conflicting parallel moves: one applies, the other reports its real refusal', OPTS, async ($, on) => {
+  boot(on)
+  await start($)
+  await call($, 'add_problem', { title: 'A' }) // n1 root
+  await call($, 'add_problem', { title: 'B' }) // n2 root
+  const [r1, r2] = await Promise.all([
+    call($, 'move_problem', { nodeId: 'n1', newParentId: 'n2' }),
+    call($, 'move_problem', { nodeId: 'n2', newParentId: 'n1' }),
+  ])
+  const t = await tree($)
+  const p1 = t.nodes['n1']?.parent
+  const p2 = t.nodes['n2']?.parent
+  expect(p1 === 'n2' && p2 === 'n1', 'no cycle may form').toBe(false)
+  expect([p1, p2].filter(p => p !== undefined)).toHaveLength(1) // 정확히 한쪽만 반영
+  const ok = [r1, r2].filter(r => String(r.result).startsWith('이동 '))
+  const refused = [r1, r2].filter(r => /순환|변화 없음/.test(String(r.result)))
+  expect(ok).toHaveLength(1) // 둘 다 "이동"이면 거짓 성공
+  expect(refused).toHaveLength(1)
+  // 성공 문구가 가리키는 쪽이 실제로 반영된 쪽
+  expect(String(ok[0]?.result)).toContain(p1 === 'n2' ? '이동 n1' : '이동 n2')
+  // 같은 이동 두 번 병렬 → 두 번째는 "변화 없음"
+  const [a, b] = await Promise.all([call($, 'move_problem', { nodeId: p1 ? 'n1' : 'n2' }), call($, 'move_problem', { nodeId: p1 ? 'n1' : 'n2' })])
+  expect([a, b].filter(r => String(r.result).startsWith('이동 '))).toHaveLength(1)
+  expect([a, b].filter(r => String(r.result).includes('변화 없음'))).toHaveLength(1)
+})
+
+// ---------- 25. 없는 부모를 가리키는 저장 노드: 루트로 정리 ----------
+
+test('a saved node whose parent does not exist is repaired to a root at load', OPTS, async ($, on) => {
+  const mk = (id: string, parent: string | undefined) => ({ id, title: id, status: 'open', parent, createdAt: T0, touchedAt: T0, reopenCount: 0, history: [] })
+  const { store } = boot(on, { [KEY]: { version: 1, seq: 7, rejected: [], nodes: { n6: mk('n6', 'n77'), n7: mk('n7', 'n6') } } })
+  await start($)
+  const t = await tree($)
+  expect(t).not.toBeNull() // 훅 skip 없음
+  expect(t.nodes['n6']?.parent).toBeUndefined() // 끊긴 부모 정리
+  expect('parent' in (t.nodes['n6'] ?? {})).toBe(false)
+  expect(t.nodes['n7']?.parent).toBe('n6') // 정상 링크는 그대로
+  expect(stored(store)?.nodes['n6']?.parent).toBeUndefined() // 저장본도 고쳐짐
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', viewport: VP })
+  expect(await ui.find({ type: 'Text', text: /^n6$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^n7$/ })).toBeDefined()
+  await ui.unmount()
+  expect((await call($, 'move_problem', { nodeId: 'n6' })).result).toContain('변화 없음') // 이제 진짜 루트
+  await turnStart($)
+  await turnDone($)
+  expect((await tree($)).nodes['n6']?.parent).toBeUndefined()
+})
+
+// ---------- 26. 병렬 같은 제목 add: 하나만 추가, 다른 하나는 중복 ----------
+
+test('conflicting parallel same-title adds: one adds, the other reports 중복', OPTS, async ($, on) => {
+  boot(on)
+  await start($)
+  const [a, b] = await Promise.all([
+    call($, 'add_problem', { title: '동시제목' }),
+    call($, 'add_problem', { title: '동시제목' }),
+  ])
+  const added = [a, b].filter(r => String(r.result).startsWith('추가 '))
+  const dup = [a, b].filter(r => String(r.result).includes('중복'))
+  expect(added, '둘 다 추가면 쓰기시점 재검사 없음').toHaveLength(1)
+  expect(dup).toHaveLength(1)
+  const t = await tree($)
+  expect(Object.values(t.nodes).filter(n => n.title === '동시제목')).toHaveLength(1) // 노드는 하나만
+})
+
