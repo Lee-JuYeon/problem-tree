@@ -96,28 +96,14 @@ def _tail_entries(transcript_path, max_lines=800, tail_bytes=1_500_000):
 
 
 def assistant_text_this_turn(transcript_path):
-    """마지막 genuine user 프롬프트 이후의 assistant text 블록을 모아 반환(없으면 None)."""
+    """transcript 꼬리(최근 몇 턴)의 assistant text 전부. 최신 지시를 여기서 찾는다.
+    ★마지막 블록은 Stop 훅보다 늦게 flush되므로 '이번 턴 지시'는 못 본다 — 대신 직전 턴
+    지시(이미 flush됨)를 집어 멱등 적용한다(±1턴 지연, 오탐 block 제거)."""
     entries = _tail_entries(transcript_path)
     if entries is None:
         return None
-    last_user = -1
-    for i, e in enumerate(entries):
-        if e.get("type") != "user":
-            continue
-        if e.get("isMeta"):
-            continue                    # Stop 훅 피드백 등 주입 메시지는 '진짜 프롬프트' 아님
-        c = (e.get("message") or {}).get("content")
-        is_prompt = False
-        if isinstance(c, str):
-            is_prompt = True
-        elif isinstance(c, list):
-            has_tr = any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c)
-            has_tx = any(isinstance(b, dict) and b.get("type") == "text" for b in c)
-            is_prompt = has_tx and not has_tr
-        if is_prompt:
-            last_user = i
     texts = []
-    for e in entries[last_user + 1:]:
+    for e in entries:
         if e.get("type") != "assistant":
             continue
         c = (e.get("message") or {}).get("content", [])
@@ -212,7 +198,7 @@ def main():
         sys.exit(0)                     # transcript 못 읽음 → Stop 막지 않음
     # flush race 대비: 내 마지막 블록(지시)이 아직 파일에 안 써졌을 수 있어 잠깐 기다렸다 재시도
     if directive is None and not stop_active:
-        for _ in range(16):             # ~8초: 마지막 블록 flush를 기다렸다 재스캔(꼬리만 읽어 싸다)
+        for _ in range(4):              # 꼬리에 최근 지시가 없을 때만 — 짧게 flush 대기
             time.sleep(0.5)
             directive, raws = _scan(tp)
             if directive is not None:
@@ -220,13 +206,10 @@ def main():
     if directive is None:
         if stop_active:
             sys.exit(0)                 # 재시도에서도 없으면 통과(무한루프 방지)
-        if raws:
-            block("ptree 지시 JSON 파싱 실패 — PTREE 주석 안을 올바른 JSON으로 넣어라"
-                  "(예시 말고 실제 지시 1개). 형식: {tree:'<root 절대경로>', add:[{id,title,parent}], resolve:['id'], rename:[{id,title}]}.")
-        block("★ptree 강제(req1,2,3): 이번 턴 작업을 다 끝냈으면 응답 맨 끝에 숨김 주석으로 "
-              "ptree 지시를 넣어 이번 턴 작업내역을 반영하라. "
-              "형식: PTREE 주석 안 JSON (tree=프로젝트 root 절대경로, add/resolve/rename). "
-              "변경이 없으면 tree만. 이 지시 없이는 턴을 끝낼 수 없다. (HTML 주석이라 화면에 안 보임.)")
+        block("★ptree 강제: 최근 여러 턴 동안 ptree 지시가 없다. 응답 맨 끝에 숨김 주석으로 "
+              "지시를 넣어 작업내역을 반영하라. 형식: PTREE 주석 안 JSON "
+              "(tree=프로젝트 root 절대경로, add:[{id,title,parent}]/resolve:['id']/rename:[{id,title}]). "
+              "변경 없으면 tree만. (HTML 주석이라 화면에 안 보이고, 훅이 백그라운드로 store에 반영한다.)")
     res = apply_ops(directive, inp.get("cwd") or "")   # directive 있으면 재시도여도 적용
     if res.get("error") and not stop_active:
         block("ptree 적용 실패: %s. tree(프로젝트 root 절대경로)를 지시에 넣어라." % res["error"])
