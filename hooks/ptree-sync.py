@@ -171,35 +171,47 @@ def apply_ops(directive, default_tree):
     return {"tree": tree, "added": added, "resolved": resolved, "renamed": renamed}
 
 
-def main():
-    inp = read_stdin()
-    stop_active = bool(inp.get("stop_hook_active"))     # block 후 재시도면 True
-    text = assistant_text_this_turn(inp.get("transcript_path"))
+def _scan(transcript_path):
+    """(directive_dict|None, raws|None). raws is None 이면 transcript 자체를 못 읽음.
+    본문에 PTREE 주석이 여러 개(예시 포함)면 전부 찾아 '마지막 유효 JSON dict'를 고른다."""
+    text = assistant_text_this_turn(transcript_path)
     if text is None:
-        sys.exit(0)                     # transcript 못 읽음 → Stop 막지 않음
-    # 본문에 PTREE 주석이 여러 개(예시 포함)일 수 있으니 전부 찾아 '마지막 유효 JSON dict'를 쓴다.
+        return None, None
     raws = DIRECTIVE_RE.findall(text)
-    directive = None
     for raw in reversed(raws):
         try:
             obj = json.loads(raw.strip())
         except Exception:
             continue
         if isinstance(obj, dict):
-            directive = obj
-            break
+            return obj, raws
+    return None, raws
+
+
+def main():
+    inp = read_stdin()
+    stop_active = bool(inp.get("stop_hook_active"))     # block 후 재시도면 True
+    tp = inp.get("transcript_path")
+    directive, raws = _scan(tp)
+    if directive is None and raws is None:
+        sys.exit(0)                     # transcript 못 읽음 → Stop 막지 않음
+    # flush race 대비: 내 마지막 블록(지시)이 아직 파일에 안 써졌을 수 있어 잠깐 기다렸다 재시도
+    if directive is None and not stop_active:
+        for _ in range(5):
+            time.sleep(0.3)
+            directive, raws = _scan(tp)
+            if directive is not None:
+                break
     if directive is None:
         if stop_active:
             sys.exit(0)                 # 재시도에서도 없으면 통과(무한루프 방지)
         if raws:
             block("ptree 지시 JSON 파싱 실패 — PTREE 주석 안을 올바른 JSON으로 넣어라"
-                  "(예시 텍스트 말고 실제 지시 1개). 형식: PTREE 주석 안 JSON "
-                  "{tree:'<root 절대경로>', add:[{id,title,parent}], resolve:['id'], rename:[{id,title}]}.")
+                  "(예시 말고 실제 지시 1개). 형식: {tree:'<root 절대경로>', add:[{id,title,parent}], resolve:['id'], rename:[{id,title}]}.")
         block("★ptree 강제(req1,2,3): 이번 턴 작업을 다 끝냈으면 응답 맨 끝에 숨김 주석으로 "
               "ptree 지시를 넣어 이번 턴 작업내역을 반영하라. "
-              "형식: PTREE 주석 안에 JSON (tree=프로젝트 root 절대경로, add/resolve/rename). "
-              "변경이 없으면 tree만 넣어 확인 표시. 이 지시 없이는 턴을 끝낼 수 없다. "
-              "(HTML 주석이라 사용자 화면에 안 보이고, Stop 훅이 백그라운드로 store에 반영한다.)")
+              "형식: PTREE 주석 안 JSON (tree=프로젝트 root 절대경로, add/resolve/rename). "
+              "변경이 없으면 tree만. 이 지시 없이는 턴을 끝낼 수 없다. (HTML 주석이라 화면에 안 보임.)")
     res = apply_ops(directive, inp.get("cwd") or "")   # directive 있으면 재시도여도 적용
     if res.get("error") and not stop_active:
         block("ptree 적용 실패: %s. tree(프로젝트 root 절대경로)를 지시에 넣어라." % res["error"])
