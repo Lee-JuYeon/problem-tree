@@ -3,7 +3,7 @@
 
 import type { Register, Timer } from 'claude-code'
 import {
-  readCache, loadTree, migrate, gc, treeOf, setLink, clearLink, targetHasLink,
+  readCache, loadTree, migrate, gc, treeOf, setLink, clearLink, targetHasLink, diagPush, diagGc,
 } from './lib/store'
 import {
   ensureSession, tasksReplace, ensureCutoff, turnStart, turnEnd, taskDrop,
@@ -139,7 +139,8 @@ async function registerSurface($: any) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await registerSurface($)
-    await ensureSession($)
+    const sid = await ensureSession($)
+    const s0 = await readSession($) // 진단: tasksReplace 전 상태
     await tasksReplace($, {})
     const now = await $.clock.now()
     await ensureCutoff($, now)
@@ -151,32 +152,62 @@ export const register: Register = on => {
     // current 애니메이션 타이머는 ensureTimer가 따로 켠다.
     if (!staleTimer) staleTimer = $.clock.every(3_600_000, () => void $.ui.invalidate('ui.render'))
     await afterWrite($)
+    await diagGc($, sid)
+    await diagPush($, sid, {
+      at: now, ev: 'sstart', before: s0.turn.mainTurnId, ptr: s0.pointer.node, tasks: Object.keys(s0.tasks.map).length,
+    })
     return next(e)
   })
 
   // ---------- 메인 턴 ----------
   on('turn.start', async ($, e, next) => {
-    if (e.agentId !== undefined) return next(e) // 서브에이전트 턴은 무시
-    await ensureSession($)
+    if (e.agentId !== undefined) {
+      // 서브에이전트 턴은 무시(동작 불변) — 진단 기록만. 메인 플래그는 안 바뀌므로 before=after.
+      try {
+        const s = await readSession($)
+        await diagPush($, await $.session.id(), {
+          at: await $.clock.now(), ev: 'start', turnId: e.turnId, agentId: e.agentId,
+          before: s.turn.mainTurnId, after: s.turn.mainTurnId, ptr: s.pointer.node, tasks: Object.keys(s.tasks.map).length,
+        })
+      } catch {
+        /* 진단 실패는 삼킴 */
+      }
+      return next(e)
+    }
+    const sid = await ensureSession($)
+    const before = (await readSession($)).turn.mainTurnId
     const now = await $.clock.now()
     await turnStart($, e.turnId, now)
     await loadTree($)
     await afterWrite($)
+    const s = await readSession($)
+    await diagPush($, sid, {
+      at: now, ev: 'start', turnId: e.turnId, before, after: s.turn.mainTurnId,
+      ptr: s.pointer.node, tasks: Object.keys(s.tasks.map).length,
+    })
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
+    const sid = await ensureSession($)
+    const before = (await readSession($)).turn.mainTurnId
     if (e.agentId !== undefined) {
       // 에이전트 턴 끝 → 그 작업 행 삭제(없으면 무동작)
-      await ensureSession($)
       await taskDrop($, e.agentId)
       await afterWrite($)
-      return next(e)
+    } else {
+      // 메인 턴 끝: turnId 확인 없이 turnEnd(현 동작 — 진단 로그 match로 어긋남을 기록한다).
+      await turnEnd($)
+      await afterWrite($)
+      void $.ui.invalidate('ui.render')
     }
-    await ensureSession($)
-    await turnEnd($)
-    await afterWrite($)
-    void $.ui.invalidate('ui.render')
+    const s = await readSession($)
+    await diagPush($, sid, {
+      at: await $.clock.now(), ev: 'complete', turnId: e.turnId, agentId: e.agentId,
+      before, after: s.turn.mainTurnId, match: e.turnId === before, ptr: s.pointer.node,
+      tasks: Object.keys(s.tasks.map).length,
+      note: String(e.reason) + (e.isAborted && e.reason !== 'aborted' ? ' aborted' : ''),
+    })
     return next(e)
   })
 
@@ -366,18 +397,16 @@ export const register: Register = on => {
           const litBgOnly = bg && !litMain
           const planned = open && n.startedAt === undefined && !litMain && !litBgOnly
           const paused = open && n.startedAt !== undefined && !litMain && !litBgOnly
-          const days = view.staleDays(n, now)
-          const stale = (planned || paused) && days >= view.STALE_DAYS
 
           const marker = resolved ? '●' : litMain ? mainFrame : litBgOnly ? bgFrame : paused ? '◐' : '○'
-          const markerColor = litMain || litBgOnly ? 'claude' : stale ? 'warning' : resolved ? 'subtle' : undefined
+          const markerColor = litMain || litBgOnly ? 'claude' : resolved ? 'subtle' : undefined
           const markerDim = resolved || planned
           const suffix = litMain && bg ? ` +${L.bgOf[n.id]}` : ''
 
           return (
             <Box key={n.id} flexDirection="row" gap={1}>
               <Text color={markerColor} dimColor={markerDim} weight={litMain ? 'semibold' : undefined}>
-                {`${branch}${stale ? '⚠' : ''}${marker}`}
+                {`${branch}${marker}`}
               </Text>
               <Text
                 dimColor={resolved}

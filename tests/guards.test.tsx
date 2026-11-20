@@ -104,19 +104,22 @@ test('마: 렌더 반복·타이머에서 영속/세션 쓰기 0', OPTS, async (
 // (c) 동기화표의 전 이벤트가 정확히 명시된 세션 테이블만 건드리는지 검사한다.
 test('마: 이벤트별 세션 쓰기 테이블이 (c)와 일치(전 이벤트)', OPTS, async ($, on) => {
   const b = boot(on)
+  // 세션 atom 쓰기 + 진단 로그 영속쓰기(store `diag:<sid>` → 'store:diag')를 함께 센다.
   const writesOf = async (fn: () => Promise<unknown>): Promise<string[]> => {
     b.store.stateWrites.length = 0
+    const s0 = b.store.sets.length
     await fn()
-    return [...new Set(b.store.stateWrites)].sort()
+    const diag = b.store.sets.slice(s0).some(x => x.key.startsWith('diag:')) ? ['store:diag'] : []
+    return [...new Set([...b.store.stateWrites, ...diag])].sort()
   }
   const eq = (got: string[], want: string[]) => expect(got).toEqual([...want].sort())
 
-  // session.start(새 sid) → resetAll(turn·pointer·agentBind·runningTasks) + nodes(migrate/gc/loadTree)
-  eq(await writesOf(() => start($)), ['agentBind', 'nodes', 'pointer', 'runningTasks', 'turn'])
+  // session.start(새 sid) → resetAll(turn·pointer·agentBind·runningTasks) + nodes(migrate/gc/loadTree) + 진단(reset·sstart)
+  eq(await writesOf(() => start($)), ['agentBind', 'nodes', 'pointer', 'runningTasks', 'store:diag', 'turn'])
 
   const x = await addId($, b.store, 'X')
-  // 메인 turn.start → turn(replace) + nodes(loadTree)
-  eq(await writesOf(() => turnStart($, 'tA')), ['nodes', 'turn'])
+  // 메인 turn.start → turn(replace) + nodes(loadTree) + 진단(start)
+  eq(await writesOf(() => turnStart($, 'tA')), ['nodes', 'store:diag', 'turn'])
   // focus_problem → pointer + nodes(patch)
   eq(await writesOf(() => call($, 'focus_problem', { nodeId: x })), ['nodes', 'pointer'])
   // add_problem(claude) → nodes만(포인터 안 건드림)
@@ -127,8 +130,10 @@ test('마: 이벤트별 세션 쓰기 테이블이 (c)와 일치(전 이벤트)'
   eq(await writesOf(() => bash($, { __bg: 'bg1' })), ['runningTasks'])
   // agent.spawn(background) → agentBind + runningTasks
   eq(await writesOf(() => spawnAgent($, { background: true, __id: 'agS' })), ['agentBind', 'runningTasks'])
-  // 에이전트 turn.complete → runningTasks(taskDrop)
-  eq(await writesOf(() => turnDone($, 'agturn', 'agS')), ['runningTasks'])
+  // 에이전트 turn.start → 진단(start)만(세션 테이블 불변)
+  eq(await writesOf(() => turnStart($, 'agturn', 'agS')), ['store:diag'])
+  // 에이전트 turn.complete → runningTasks(taskDrop) + 진단(complete)
+  eq(await writesOf(() => turnDone($, 'agturn', 'agS')), ['runningTasks', 'store:diag'])
   // classic.Stop → runningTasks(통째 replace)
   eq(await writesOf(() => stop($, [{ id: 'bg1', type: 'shell', status: 'running', description: 'x' }])), ['runningTasks'])
   // reopen → nodes(patch) + pointer(set)  [먼저 resolve해 둠]
@@ -142,8 +147,8 @@ test('마: 이벤트별 세션 쓰기 테이블이 (c)와 일치(전 이벤트)'
   const v = await addId($, b.store, 'V')
   await run($, `focus ${v}`)
   eq(await writesOf(() => run($, `rm ${v}`)), ['nodes', 'pointer'])
-  // 메인 turn.complete → turn만
-  eq(await writesOf(() => turnDone($, 'tA')), ['turn'])
+  // 메인 turn.complete → turn + 진단(complete)
+  eq(await writesOf(() => turnDone($, 'tA')), ['store:diag', 'turn'])
 })
 
 // ---------- 탐침4 (버그4): classic.Stop try/catch 구조 ----------

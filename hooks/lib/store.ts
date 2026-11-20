@@ -3,7 +3,7 @@
 // 읽기 캐시(nodesAtom)는 패널 렌더 전용 복제본이며, 권위는 언제나 store다.
 
 import { atom, read, update } from 'claude-code'
-import type { PtreeNode, PtreeNodesCache } from '../../types'
+import type { PtreeNode, PtreeNodesCache, PtreeDiag } from '../../types'
 import { GC_DAYS, DAY, doneUnits } from './view'
 
 const EMPTY_CACHE: PtreeNodesCache = { tree: '', nodes: {}, syncedAt: 0 }
@@ -68,7 +68,17 @@ async function writeCache($: Any, tree: string, nodes: Record<string, PtreeNode>
 /** store → 캐시 통째 교체. 반환 = 방금 읽은 노드 맵(조작이 바로 쓴다). */
 export async function loadTree($: Any): Promise<Record<string, PtreeNode>> {
   const { tree } = await treeOf($)
+  const g0 = patchSeq // 진단: 읽는 도중 patch/insert가 캐시 행을 갱신했는지(덮어쓰기 후보) 탐지용
   const nodes = await loadNodesRaw($)
+  if (patchSeq !== g0) {
+    // 진단 전용(동작 불변: 아래에서 그대로 덮어쓴다). sid는 이 분기에서만 읽는다.
+    try {
+      const sid = await $.session.id()
+      await diagPush($, sid, { at: await $.clock.now(), ev: 'clobber', note: `seq ${g0}→${patchSeq}` })
+    } catch {
+      /* 진단 실패는 삼킴 */
+    }
+  }
   await writeCache($, tree, nodes)
   return nodes
 }
@@ -82,6 +92,8 @@ export async function readCache($: Any): Promise<PtreeNodesCache> {
 // ---------- 직렬화 쓰기 큐 ----------
 // 프로세스 내 모듈 promise 체인. patchNode(다행)와 insertNode(유일성)가 공유한다.
 let queue: Promise<unknown> = Promise.resolve()
+// 진단: patchNode·insertNode가 캐시 행을 갱신할 때마다 +1(loadTree의 덮어쓰기 탐지용).
+let patchSeq = 0
 function enqueue<T>(run: () => Promise<T>): Promise<T> {
   const p = queue.then(run, run)
   queue = p.catch(() => undefined)
@@ -106,6 +118,7 @@ export function patchNode($: Any, id: string, fn: (n: PtreeNode, at: number) => 
     if (typeof rej === 'string') return { error: rej }
     if (draft.history.length > 20) draft.history = draft.history.slice(-20)
     await $.store.set(key, draft)
+    patchSeq++
     await update($, nodesAtom, (c: PtreeNodesCache) => ({ ...c, tree, nodes: { ...c.nodes, [id]: draft } }))
     return { node: draft }
   })
@@ -133,6 +146,7 @@ export function insertNode(
       if (err) return { error: err }
     }
     await $.store.set(key, node)
+    patchSeq++
     await update($, nodesAtom, (c: PtreeNodesCache) => ({ ...c, tree, nodes: { ...c.nodes, [node.id]: node } }))
     return { node }
   })
@@ -225,4 +239,50 @@ export async function migrate($: Any): Promise<void> {
   await $.store.delete(legacyKey)
   await $.store.set('schema', 2)
   await writeCache($, tree, await loadNodesRaw($))
+}
+
+// ---------- 진단 로그(diag:<sid>, 세션별 최근 50건) ----------
+// 불(점등) 동작과 무관한 기록 전용. 절대 throw하지 않고 큐도 오염시키지 않는다.
+
+const DIAG_MAX = 50
+const DIAG_GC_MS = 7 * DAY
+const diagKey = (sid: string) => `diag:${sid}`
+
+/** 항목 1건을 diag:<sid> 끝에 붙이고 최근 50건만 남긴다(직렬 큐 경유, 실패는 삼킴). */
+export function diagPush($: Any, sid: string, entry: PtreeDiag): Promise<void> {
+  try {
+    return enqueue(async () => {
+      try {
+        const row: Record<string, unknown> = {}
+        for (const [k, v] of Object.entries(entry)) if (v !== undefined) row[k] = v
+        const key = diagKey(sid)
+        const cur = await $.store.get(key)
+        const arr: unknown[] = Array.isArray(cur) ? cur : []
+        arr.push(row)
+        await $.store.set(key, arr.slice(-DIAG_MAX))
+      } catch {
+        /* 진단 실패는 삼킴 */
+      }
+    })
+  } catch {
+    return Promise.resolve()
+  }
+}
+
+/** 다른 세션의 diag: 키 중 마지막 항목이 7일보다 오래됐거나 형식이 이상한 것을 지운다. */
+export async function diagGc($: Any, ownSid: string): Promise<void> {
+  try {
+    const now = await $.clock.now()
+    const own = diagKey(ownSid)
+    const keys: string[] = await $.store.keys()
+    for (const k of keys) {
+      if (!k.startsWith('diag:') || k === own) continue
+      const v = await $.store.get(k)
+      const last = Array.isArray(v) && v.length > 0 ? v[v.length - 1] : undefined
+      const at = last && typeof last.at === 'number' ? last.at : undefined
+      if (at === undefined || at < now - DIAG_GC_MS) await $.store.delete(k)
+    }
+  } catch {
+    /* 진단 정리 실패는 삼킴 */
+  }
 }

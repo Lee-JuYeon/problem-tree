@@ -4,7 +4,7 @@
 
 import { atom, read, update } from 'claude-code'
 import type { PtreeTurn, PtreePointer, PtreeAgentBind, PtreeRunningTasks, PtreeTask } from '../../types'
-import { loadTree } from './store'
+import { loadTree, diagPush } from './store'
 import type { SessionView } from './view'
 
 type Any = any
@@ -59,6 +59,7 @@ export async function ensureSession($: Any): Promise<string> {
     const now = await $.clock.now()
     await resetAll($, cur, now)
     await loadTree($)
+    await diagPush($, cur, { at: now, ev: 'reset', note: `${turn.sid.slice(0, 8)}→${cur.slice(0, 8)}` })
   }
   return cur
 }

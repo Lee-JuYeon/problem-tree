@@ -25,6 +25,7 @@ export type Store = {
   // 테스트 주입 훅(기본 미설정 → 무동작). 다른 엔진의 동시쓰기·인터리브를 모사한다.
   onKeys?: () => void // store.keys 호출마다(get/validate 재읽기 직전 끼어들기용)
   onSet?: (key: string) => void // 각 key의 실제 store.set 직전(get과 set 사이 외부쓰기용)
+  keysGate?: () => Promise<void> | void // store.keys 응답을 붙잡아 다른 훅을 끼우는 비동기 게이트(진단 D5용)
 }
 
 export type Boot = {
@@ -68,8 +69,9 @@ export function boot(on: On, entries?: Record<string, unknown>): Boot {
     store.deletes.push(e.key)
     return { value: undefined }
   })
-  on('store.keys', () => {
+  on('store.keys', async () => {
     store.onKeys?.()
+    if (store.keysGate) await store.keysGate()
     return { value: [...store.map.keys()] }
   })
   on('state.set', ((_: any, e: any, next: any) => {

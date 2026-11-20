@@ -46,6 +46,11 @@ Claude Code 세션 옆에 상주하는 **문제해결 노드트리** 패널. 긴
 
 작업 디렉터리별로 `$.store` 키 `tree:<cwd>`에 영속 저장된다. 세션이 끝나거나 컨텍스트가 요약돼도 트리가 남아 다음 세션에서 이어진다. 세션 내 반응형 미러는 `$.state`.
 
+## 진단 로그(불 꺼짐 추적용, 동작 무관)
+
+세션별 store 키 `diag:<sessionId>`에 최근 50건(7일 지난 다른 세션 키는 session.start에서 정리). 항목: `at`(ms), `ev`(start=turn.start·complete=turn.complete·reset=세션교체·sstart=session.start·clobber=loadTree가 읽는 도중 patch가 끼어 캐시를 덮어씀), `turnId`·`agentId`, `before`/`after`(그 훅 전/후 `mainTurnId`, 없으면 생략), `match`(complete의 turnId==before), `ptr`(포인터 노드), `tasks`(백그라운드 작업 수), `note`(complete=reason, reset=`옛sid→새sid`, clobber=`seq a→b`).
+읽기: `python3 -c "import json;d=json.load(open('$HOME/.claude/plugins/store/problem-tree_skills-dir-a8b1b87c1491.json'));[print(k,len(v)) for k,v in d.items() if k.startswith('diag:')]"` — 한 세션 상세는 `print(json.dumps(d['diag:<sid>'],indent=1,ensure_ascii=False))`. 범인 후보: 메인 턴 중 `complete`에 `match:false`·에이전트 아닌데 다른 turnId, `reset`/`sstart`가 턴 중간에 찍힘, `clobber`.
+
 ## 설계 메모
 
 - 도구의 입력 타입은 `types/index.d.ts`의 `McpToolInputs`에 **직접 선언**한다(생성 `claude-code-mcp` 스냅샷은 한 리로드 뒤처지므로 거기 기대지 않음). `tool.call` 리터럴 매처가 그 선언으로 `e`를 좁힌다.

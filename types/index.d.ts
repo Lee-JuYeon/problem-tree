@@ -45,6 +45,20 @@ export type PtreeTaskSource = 'snapshot' | 'provisional'
 export type PtreeTask = { type: string; node?: string; source: PtreeTaskSource }
 export type PtreeRunningTasks = { sid: string; map: Record<string, PtreeTask> }
 
+/** 진단 로그 1건(store 키 `diag:<sessionId>`, 최근 50건). before/after = 그 훅이 쓰기 전/후의 turn.mainTurnId. */
+export type PtreeDiag = {
+  at: number
+  ev: 'start' | 'complete' | 'reset' | 'sstart' | 'clobber'
+  turnId?: string
+  agentId?: string
+  before?: string
+  after?: string
+  match?: boolean
+  ptr?: string
+  tasks?: number
+  note?: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'problem-tree': {
