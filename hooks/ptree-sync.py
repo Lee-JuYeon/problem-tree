@@ -68,22 +68,37 @@ def read_stdin():
         return {}
 
 
-def assistant_text_this_turn(transcript_path):
-    """마지막 genuine user 프롬프트 이후의 assistant text 블록을 모아 반환(없으면 None)."""
+def _tail_entries(transcript_path, max_lines=800, tail_bytes=1_500_000):
+    """transcript 꼬리만 읽어 파싱(전체 재파싱 방지 — 재시도 싸게). 현재 턴은 늘 꼬리에 있다."""
     if not transcript_path or not os.path.exists(transcript_path):
         return None
-    entries = []
     try:
-        with open(transcript_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entries.append(json.loads(line))
-                except Exception:
-                    pass
+        size = os.path.getsize(transcript_path)
+        with open(transcript_path, "rb") as f:
+            start = max(0, size - tail_bytes)
+            f.seek(start)
+            raw = f.read()
     except Exception:
+        return None
+    lines = raw.decode("utf-8", errors="ignore").splitlines()
+    if start > 0 and lines:
+        lines = lines[1:]                # 잘린 첫 줄 버림
+    entries = []
+    for ln in lines[-max_lines:]:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            entries.append(json.loads(ln))
+        except Exception:
+            pass
+    return entries
+
+
+def assistant_text_this_turn(transcript_path):
+    """마지막 genuine user 프롬프트 이후의 assistant text 블록을 모아 반환(없으면 None)."""
+    entries = _tail_entries(transcript_path)
+    if entries is None:
         return None
     last_user = -1
     for i, e in enumerate(entries):
@@ -197,8 +212,8 @@ def main():
         sys.exit(0)                     # transcript 못 읽음 → Stop 막지 않음
     # flush race 대비: 내 마지막 블록(지시)이 아직 파일에 안 써졌을 수 있어 잠깐 기다렸다 재시도
     if directive is None and not stop_active:
-        for _ in range(5):
-            time.sleep(0.3)
+        for _ in range(16):             # ~8초: 마지막 블록 flush를 기다렸다 재스캔(꼬리만 읽어 싸다)
+            time.sleep(0.5)
             directive, raws = _scan(tp)
             if directive is not None:
                 break
