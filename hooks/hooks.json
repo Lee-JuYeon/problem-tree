@@ -1,1 +1,17 @@
-{ "modules": ["./register.tsx"] }
+{
+  "description": "problem-tree 패널(모듈) + 매 턴 끝 ptree 강제 갱신 Stop 훅(백그라운드).",
+  "modules": ["./register.tsx"],
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ptree-sync.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

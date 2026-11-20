@@ -51,6 +51,16 @@ Claude Code 세션 옆에 상주하는 **문제해결 노드트리** 패널. 긴
 세션별 store 키 `diag:<sessionId>`에 최근 50건(7일 지난 다른 세션 키는 session.start에서 정리). 항목: `at`(ms), `ev`(start=turn.start·complete=turn.complete·reset=세션교체·sstart=session.start·clobber=loadTree가 읽는 도중 patch가 끼어 캐시를 덮어씀), `turnId`·`agentId`, `before`/`after`(그 훅 전/후 `mainTurnId`, 없으면 생략), `match`(complete의 turnId==before), `ptr`(포인터 노드), `tasks`(백그라운드 작업 수), `note`(complete=reason, reset=`옛sid→새sid`, clobber=`seq a→b`).
 읽기: `python3 -c "import json;d=json.load(open('$HOME/.claude/plugins/store/problem-tree_skills-dir-a8b1b87c1491.json'));[print(k,len(v)) for k,v in d.items() if k.startswith('diag:')]"` — 한 세션 상세는 `print(json.dumps(d['diag:<sid>'],indent=1,ensure_ascii=False))`. 범인 후보: 메인 턴 중 `complete`에 `match:false`·에이전트 아닌데 다른 turnId, `reset`/`sstart`가 턴 중간에 찍힘, `clobber`.
 
+## 매 턴 끝 강제 갱신(Stop 훅 — `hooks/ptree-sync.py`)
+
+MCP 도구 호출(`add_problem` 등)은 터미널 렌더를 못 숨긴다. 그래서 **메인 대화에서 가시 MCP 호출을 쓰지 않고**, Claude가 응답 맨 끝에 **숨김 HTML 주석 지시**를 남기면 `hooks.json`의 **Stop command 훅**(`ptree-sync.py`)이 턴 끝에 **백그라운드로** store를 직접 갱신한다. 지시가 없으면 Stop을 **block**해서 매 턴 갱신을 강제한다(한 턴 1회, `stop_hook_active`로 무한루프 방지).
+
+지시 형식(HTML 주석이라 사용자 화면에 안 보임):
+```
+<!--PTREE {"tree":"<프로젝트 root 절대경로>","add":[{"id":"ab12","title":"16자내","parent":"<부모id|null>"}],"resolve":["id"],"rename":[{"id":"x","title":"새 제목"}]}-->
+```
+변경 없는 턴은 `<!--PTREE {"tree":"<root>"}-->`만. store 파일은 `~/.claude/plugins/store/problem-tree_*.json`에서 `node:`/`schema`를 가진 파일을 자동 선택(기기 독립). focus/current(●)는 세션 런타임 atom이라 외부서 못 바꾼다 — add/resolve/rename만 백그라운드 가능.
+
 ## 설계 메모
 
 - 도구의 입력 타입은 `types/index.d.ts`의 `McpToolInputs`에 **직접 선언**한다(생성 `claude-code-mcp` 스냅샷은 한 리로드 뒤처지므로 거기 기대지 않음). `tool.call` 리터럴 매처가 그 선언으로 `e`를 좁힌다.
