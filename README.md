@@ -60,7 +60,7 @@ Claude Code 세션 옆에 상주하는 **문제해결 노드트리** 패널. 긴
 - 파일별 지문 `adopt:<파일명>`={size,mtimeMs,ver}가 같으면 다시 읽지 않는다(`ver`는 이미 합친 행의 get을 아끼는 용도일 뿐).
 - 못 읽은 파일(4 MiB 초과·깨진 JSON·쓰기 거부)과 같은 id의 다른 노드(따로 만들어진 것)는 덮지 않고 토스트로 알린다.
 
-알려진 한계: 흡수는 `session.start`에만 일어난다. 두 식별자가 **동시에** 살아 있는 동안(옛 세션이 아직 떠 있을 때) 한쪽의 변경은 다른 쪽의 다음 세션 시작까지 안 보인다.
+알려진 한계: ①같은 4자 id의 서로 다른 노드가 두 식별자에서 따로 만들어지면(극히 드묾) 행은 덮지 않고 알리지만, 삭제 기록은 id만 보므로 한쪽의 GC가 다른 쪽의 그 id를 지울 수 있다. ②흡수는 `session.start`에만 일어난다. 두 식별자가 **동시에** 살아 있는 동안(옛 세션이 아직 떠 있을 때) 한쪽의 변경은 다른 쪽의 다음 세션 시작까지 안 보인다.
 
 ## 패널 감시 Stop 훅(`hooks/ptree-watch.py`, 선택·읽기 전용)
 
@@ -105,7 +105,7 @@ hooks/lib/view.ts      순수 계산($ 없음: 숨김·레이아웃·불·목록
 hooks/ptree-watch.py   패널 감시 Stop 훅(선택, settings.json에 등록, 읽기 전용)
 ```
 
-의존은 한 방향: register → tools/command/pane → ops → store/session → view. 불변식은 `tests/guards.test.tsx`(행동: 렌더·타이머 쓰기 0, 이벤트별 쓰기 테이블, Stop 핸들러는 절대 안 막음)와 `tests/static_guard.py`(소스: store 쓰기는 store.ts에만, 세션 atom은 session.ts에만, 파일 쓰기·프로세스·네트워크 0, 훅 매처는 register.tsx에 리터럴)가 지킨다.
+의존은 한 방향: register → tools/command/pane → ops → store/session → view. store에 새 종류의 영구 키를 더할 때는 형제 store와의 병합 규칙(`adoptFile`)을 같이 정한다. 불변식은 `tests/guards.test.tsx`(행동: 렌더·타이머 쓰기 0, 이벤트별 쓰기 테이블, Stop 핸들러는 절대 안 막음)와 `tests/static_guard.py`(소스: store 쓰기는 store.ts에만, 세션 atom은 session.ts에만, 파일 쓰기·프로세스·네트워크 0, 훅 매처는 register.tsx에 리터럴)가 지킨다.
 
 ## 설계 메모
 

@@ -62,6 +62,7 @@ async function adoptOrphans($: any) {
   try {
     const r = await adoptSiblings($)
     if (r.adopted > 0) $.ui.toast(`문제트리: 다른 설치의 store에서 ${r.adopted}행을 가져왔습니다 (${r.files.join(', ')})`)
+    if (r.removed > 0) $.ui.toast(`문제트리: 다른 설치에서 이미 정리된 노드 ${r.removed}개를 지웠습니다`)
     if (r.skipped.length > 0)
       $.ui.toast(`문제트리: 읽지 못한 옛 store가 있습니다(노드가 안 보일 수 있음): ${r.skipped.join(', ')}`)
     if (r.conflicts.length > 0)

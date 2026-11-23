@@ -13,6 +13,8 @@
 //   diag:<세션id>         진단 로그 최근 50건 — 턴 시작 항목은 ptree-watch.py가 박동으로 읽는다
 //   tree:<root>          레거시 v1(통째 트리). migrate가 node: 행으로 바꾸고 지운다
 // 휘발 사실(도는 중·포인터·백그라운드 작업)은 여기 없다 — session.ts의 세션 atom에만 있다.
+// ★새 종류의 키를 더할 때는 "형제 store와 어떻게 합치는가"(adoptFile)를 같이 정한다 — 식별자마다
+//   store 파일이 따로라, 병합 규칙 없는 영구 키는 식별자가 바뀔 때 고아가 되거나 되살아난다.
 
 import { atom, read, update } from 'claude-code'
 import type { PtreeNode, PtreeNodesCache, PtreeDiag } from '../../types'
@@ -283,7 +285,7 @@ const ADOPT_MAX_BYTES = 4 * 1024 * 1024 // $.fs.read 상한(4 MiB)
 const adoptKey = (name: string) => `adopt:${name}`
 const STORE_ID_KEY = 'store:id' // 이 store 파일의 표식(형제 목록에서 자기 파일을 알아보는 용도)
 
-export type AdoptResult = { adopted: number; files: string[]; skipped: string[]; conflicts: string[] }
+export type AdoptResult = { adopted: number; removed: number; files: string[]; skipped: string[]; conflicts: string[] }
 
 /** store 디렉터리(절대경로). CLAUDE_CONFIG_DIR 우선, 없으면 $HOME/.claude. 못 구하면 undefined. */
 async function storeDir($: Any): Promise<string | undefined> {
@@ -319,7 +321,7 @@ const isNodeRow = (v: any): v is PtreeNode =>
  */
 export function adoptSiblings($: Any): Promise<AdoptResult> {
   return enqueue(async () => {
-    const out: AdoptResult = { adopted: 0, files: [], skipped: [], conflicts: [] }
+    const out: AdoptResult = { adopted: 0, removed: 0, files: [], skipped: [], conflicts: [] }
     const dir = await storeDir($)
     if (!dir) return out
     let entries: any[]
@@ -428,8 +430,10 @@ async function adoptFile(
     const mine = await goneOf(pre)
     let changed = false
     for (const [id, at] of Object.entries(v as Record<string, unknown>)) {
-      if (typeof at !== 'number' || !Number.isFinite(at)) continue
-      const t = Math.min(at, now)
+      // 미래 시각 기록은 깨진 값(시계가 튄 채 GC) → 버린다. now로 자르면 내 모든 사본이 "그 이전"이 되어
+      // 살아 있는 행까지 지우게 된다.
+      if (typeof at !== 'number' || !Number.isFinite(at) || at > now) continue
+      const t = at
       if (mine[id] !== undefined && mine[id]! >= t) continue
       mine[id] = t
       changed = true
@@ -440,6 +444,7 @@ async function adoptFile(
       if (cur && rowVersion(cur) <= t) {
         await $.store.delete(key)
         own.delete(key)
+        out.removed++
       }
     }
     if (changed) {
@@ -460,7 +465,7 @@ async function adoptFile(
       if (doomed.get(pre)!.has(v.id)) continue
       // 내가 GC로 지운 노드: 형제의 사본이 그 뒤에 바뀐 것(재개 등)일 때만 다시 받는다.
       const goneAt = gone.get(pre)![v.id]
-      if (goneAt !== undefined && !(rv > goneAt)) continue
+      if (goneAt !== undefined && goneAt <= now && !(rv > goneAt)) continue
       own.add(k)
       await $.store.set(k, { ...v, history: v.history.slice(-20) })
       count++

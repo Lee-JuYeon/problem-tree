@@ -462,6 +462,7 @@ test('C11: 형제가 GC한 노드의 낡은 내 사본은 같이 지워지고, �
   await start($)
   expect(nodeIds(store)).toEqual(['new1'])
   expect(store.map.get(`gone:${ROOT}`)).toEqual({ old1: T0 - HOUR, new1: T0 - HOUR })
+  expect(store.toasts).toContain('문제트리: 다른 설치에서 이미 정리된 노드 1개를 지웠습니다') // 무음 삭제 금지
 })
 
 test('C12: store가 가득 차 삭제 기록을 못 써도 GC와 세션 시작은 끝까지 간다', async ($, on) => {
@@ -481,4 +482,17 @@ test('C13: C10을 파일 순서를 뒤집어도 같다(낡은 사본을 먼저 �
   store.files['problem-tree_zzz-9.json'] = file({ 'store:id': 'L', [`gone:${ROOT}`]: { xxxx: T0 - HOUR }, [nk('keep')]: row('keep', 'KEEP') })
   await start($)
   expect(nodeIds(store)).toEqual(['keep'])
+})
+
+test('C14: 미래 시각이 찍힌 삭제 기록은 버린다 — 살아 있는 내 행을 지우지도, 내 gone에 섞이지도 않는다', async ($, on) => {
+  const { store } = boot(on, { [nk('live')]: row('live', '어제 만진 것'), [nk('kid1')]: row('kid1', '자식', { parent: 'live' }) })
+  sibling(store, { [`gone:${ROOT}`]: { live: T0 + 365 * DAY }, [nk('late')]: row('late', '형제의 새 행', { createdAt: T0 - HOUR, touchedAt: T0 - HOUR }) }, 1)
+  await start($)
+  expect(nodeIds(store).sort()).toEqual(['kid1', 'late', 'live'])
+  expect(store.map.has(`gone:${ROOT}`)).toBe(false)
+  expect(store.toasts.some(t => t.includes('지웠습니다'))).toBe(false)
+  const before = store.sets.length
+  sibling(store, { [`gone:${ROOT}`]: { live: T0 + 365 * DAY } }, 2)
+  await start($)
+  expect(store.sets.slice(before).filter(x => x.key.startsWith('gone:'))).toEqual([]) // 매 시작 다시 쓰지 않는다
 })
