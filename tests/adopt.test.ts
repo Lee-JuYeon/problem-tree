@@ -2,6 +2,7 @@
 // 재현: 옛 식별자 store 파일(skills-dir)에 노드가 있고, 새 식별자 store(자기 $.store)는 비어 있다.
 import { expect, test } from 'claude-code/testing'
 import { boot, start, call, run, nk, nodeOf, nodeIds, ROOT, T0, DAY } from './harness'
+import { mergeRows } from '../hooks/lib/store'
 
 const OLD = 'problem-tree_skills-dir-a8b1b87c1491.json'
 const DIR = '/home/u/.claude/plugins/store'
@@ -391,4 +392,53 @@ test('C6: 합칠 것이 없으면(같은 내용) 쓰기 0 — 두 식별자가 �
   sibling(store, { ...rows, [nk('aaaa')]: row('aaaa', 'A', { modAt: T0 - 60_000 }) }, 3)
   await start($)
   expect(store.sets.slice(again).filter(x => x.key.startsWith('node:'))).toEqual([])
+})
+
+test('C7: 내가 GC로 지운 노드는, 오래 쉬던 형제의 낡은 열린 사본으로 되살아나지 않는다 — 그 뒤 형제가 바꾼 것만 받는다', async ($, on) => {
+  const bt = boot(on, {
+    [nk('xxxx')]: row('xxxx', '지운 것', { status: 'removed', removedAt: T0 - 31 * DAY }),
+    [nk('yyyy')]: row('yyyy', '끝낸 것', { status: 'resolved', resolvedAt: T0 - 31 * DAY }),
+    [nk('zzzz')]: row('zzzz', '끝낸 것2', { status: 'resolved', resolvedAt: T0 - 31 * DAY }),
+  })
+  const { store } = bt
+  await start($) // GC가 셋 다 물리 삭제
+  expect(nodeIds(store)).toEqual([])
+  expect(Object.keys(store.map.get(`gone:${ROOT}`) as object).sort()).toEqual(['xxxx', 'yyyy', 'zzzz'])
+  await bt.clock.advance(HOUR)
+  // 형제는 그동안 쉬어서 셋 다 옛 열린 사본. zzzz만 내 GC 뒤에 형제에서 실제로 다시 손댔다.
+  sibling(store, {
+    [nk('xxxx')]: row('xxxx', '지운 것'),
+    [nk('yyyy')]: row('yyyy', '끝낸 것'),
+    [nk('zzzz')]: row('zzzz', '끝낸 것2', { touchedAt: T0 + 60_000, modAt: T0 + 60_000 }),
+  }, 1)
+  await start($)
+  expect(nodeIds(store)).toEqual(['zzzz'])
+})
+
+test('C8: 이관 뒤 전부 GC된 트리의 레거시 tree:는 다시 가져오지 않는다', async ($, on) => {
+  const { store } = boot(on, { [nk('k1')]: row('k1', 'K', { status: 'removed', removedAt: T0 - 31 * DAY }) })
+  await start($)
+  expect(nodeIds(store)).toEqual([])
+  sibling(store, { [`tree:${ROOT}`]: { version: 1, seq: 1, nodes: { k1: { id: 'k1', title: 'K', status: 'open' } } } }, 1)
+  await start($)
+  expect(store.map.has(`tree:${ROOT}`)).toBe(false)
+  expect(nodeIds(store)).toEqual([])
+})
+
+test('C9: mergeRows는 어느 쪽에서 합쳐도 같은 답(동률 포함) — 두 store가 한 바퀴에 수렴한다', () => {
+  const mk = (extra: Record<string, unknown>) => row('aaaa', 'A', { modAt: T0, ...extra }) as any
+  const pairs: [any, any][] = [
+    [mk({ title: '가' }), mk({ title: '나' })], // 버전 동률·내용 다름
+    [mk({ status: 'resolved', resolvedAt: T0 - 5 }), mk({ status: 'resolved', resolvedAt: T0 - 9 })], // 각자 해결
+    [mk({ status: 'removed', removedAt: T0 - 5 }), mk({ status: 'removed', removedAt: T0 - 9, modAt: T0 + 1 })], // 각자 삭제
+    [mk({ status: 'resolved', resolvedAt: T0 - 5, modAt: T0 - 1 }), mk({ title: '새', modAt: T0 + 5 })], // 낡은 바탕
+    [mk({ status: 'resolved', resolvedAt: T0 - 5 }), mk({ reopenCount: 1, modAt: T0 - 50 })], // 진짜 재개
+  ]
+  for (const [a, b] of pairs) {
+    const ab = mergeRows(a, b)
+    const ba = mergeRows(b, a)
+    expect(ab).toEqual(ba)
+    expect(mergeRows(ab, a)).toEqual(ab) // 고정점: 다시 합쳐도 그대로
+    expect(mergeRows(ab, b)).toEqual(ab)
+  }
 })

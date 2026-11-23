@@ -7,6 +7,7 @@
 //   link:<root>          이 root가 다른 tree를 보게 하는 연결(문자열). false = unlink 묘비
 //   schema               노드행 스키마 버전(2)
 //   store:id             이 store 파일의 표식(형제 파일 중 자기 파일 식별)
+//   gone:<treeKey>       GC로 물리 삭제한 노드 {id: 시각} — 형제 store의 낡은 사본이 되살리지 못하게(1년 보관)
 //   adopt:<파일명>        형제 store 파일을 마지막으로 흡수한 지문 {size,mtimeMs,ver}
 //   diag:<세션id>         진단 로그 최근 50건 — 턴 시작 항목은 ptree-watch.py가 박동으로 읽는다
 //   tree:<root>          레거시 v1(통째 트리). migrate가 node: 행으로 바꾸고 지운다
@@ -170,13 +171,31 @@ export function insertNode(
 export async function gc($: Any): Promise<void> {
   const { tree, treeKey } = await treeOf($)
   const nodes = await loadNodesRaw($)
-  const del = gcIds(nodes, await $.clock.now())
+  const now = await $.clock.now()
+  const del = gcIds(nodes, now)
   if (del.size === 0) return
+  // 지운 id를 먼저 기록한다(기록 뒤 삭제: 중간에 죽어도 "지웠는데 기록 없음"이 안 생긴다).
+  const gone = await readGone($, treeKey)
+  for (const id of del) gone[id] = now
+  for (const [id, at] of Object.entries(gone)) if (at < now - GONE_KEEP_MS) delete gone[id]
+  await $.store.set(goneKey(treeKey), gone)
   for (const id of del) {
     await $.store.delete(nodeKey(treeKey, id))
     delete nodes[id]
   }
   await writeCache($, tree, nodes)
+}
+
+// GC로 물리 삭제한 노드 id와 그 시각. 30일 묘비가 사라진 뒤에도 "내가 지웠다"를 기억해,
+// 오래 쉬던 형제 store의 낡은 사본이 그 노드를 되살리지 못하게 한다(adoptFile이 본다).
+const GONE_KEEP_MS = 365 * DAY
+const goneKey = (treeKey: string) => `gone:${treeKey}`
+async function readGone($: Any, treeKey: string): Promise<Record<string, number>> {
+  const v = await $.store.get(goneKey(treeKey))
+  const out: Record<string, number> = {}
+  if (v && typeof v === 'object' && !Array.isArray(v))
+    for (const [id, at] of Object.entries(v)) if (typeof at === 'number') out[id] = at
+  return out
 }
 
 // ---------- link ----------
@@ -347,8 +366,13 @@ const statusRank = (n: PtreeNode): number =>
  * 형제 세션이 내 해결/삭제를 모른 채(낡은 바탕) 뒤늦게 focus·rename 해도 해결/삭제가 안 되돌아간다.
  */
 export function mergeRows(cur: PtreeNode, inc: PtreeNode): PtreeNode {
-  const base = rowVersion(inc) > rowVersion(cur) ? inc : cur
-  const st = statusRank(inc) > statusRank(cur) ? inc : cur
+  // 동률은 내용의 글자순으로 가른다 — 어느 쪽에서 합쳐도 같은 답이 나와야 두 store가 수렴한다.
+  const vc = rowVersion(cur)
+  const vi = rowVersion(inc)
+  const base = vi > vc || (vi === vc && JSON.stringify(inc) > JSON.stringify(cur)) ? inc : cur
+  const rc = statusRank(cur)
+  const ri = statusRank(inc)
+  const st = ri > rc ? inc : rc > ri ? cur : base
   const out: PtreeNode = { ...base, status: st.status, reopenCount: st.reopenCount }
   for (const f of ['resolvedAt', 'resolvedBy', 'removedAt'] as const) {
     if (st[f] !== undefined) (out as any)[f] = st[f]
@@ -362,7 +386,8 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 
 /**
  * 형제 store 한 파일의 행을 흡수한다. 반환 = 흡수한 행 수와 새 워터마크.
- * - 내 쪽에 없는 행은 **항상** 본다. 단 GC 규칙상 곧 지워질 행(gcIds — 내가 이미 지운 것도 여기 든다)은 안 가져온다.
+ * - 내 쪽에 없는 행은 **항상** 본다. 단 GC 규칙상 곧 지워질 행(gcIds)과, 내가 GC로 지운 뒤 안 바뀐 행
+ *   (gone:<tree> 기록)은 안 가져온다.
  * - 내 쪽에 있는 행은 mergeRows로 합친다. 워터마크(ver = 지난번에 그 파일에서 본 가장 새 행 버전)는
  *   get 절약용일 뿐이다: 그 이하 버전이고 내 쪽에 있는 행은 지난번에 이미 합쳤으므로 건너뛴다.
  */
@@ -385,13 +410,20 @@ async function adoptFile(
     rows.push({ k, v, pre })
   }
   const doomed = new Map<string, Set<string>>()
-  for (const [pre, nodes] of byTree) doomed.set(pre, gcIds(nodes, now))
+  const gone = new Map<string, Record<string, number>>()
+  for (const [pre, nodes] of byTree) {
+    doomed.set(pre, gcIds(nodes, now))
+    gone.set(pre, await readGone($, pre.slice('node:'.length, -1)))
+  }
 
   for (const { k, v, pre } of rows) {
     const rv = Math.min(rowVersion(v), now) // 미래 시각 행이 워터마크를 망가뜨리지 않게
     if (rv > ver) ver = rv
     if (!own.has(k)) {
       if (doomed.get(pre)!.has(v.id)) continue
+      // 내가 GC로 지운 노드: 형제의 사본이 그 뒤에 바뀐 것(재개 등)일 때만 다시 받는다.
+      const goneAt = gone.get(pre)![v.id]
+      if (goneAt !== undefined && !(rv > goneAt)) continue
       own.add(k)
       await $.store.set(k, { ...v, history: v.history.slice(-20) })
       count++
@@ -426,6 +458,7 @@ async function adoptFile(
       const legacy = v as any
       if (!legacy || legacy.version !== 1 || !legacy.nodes) continue
       if (byTree.has(pre) || [...own].some(x => x.startsWith(pre))) continue
+      if (own.has(goneKey(pre.slice('node:'.length, -1)))) continue // 이관했고 그 뒤 전부 GC된 트리
       own.add(k)
       await $.store.set(k, v)
       count++
