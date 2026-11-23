@@ -1,6 +1,16 @@
 // (a) STORE — 영속 DB(store)의 유일한 창구(가드 가·나).
 // `$.store.set`/`$.store.delete`는 이 파일에만 있다. nodesAtom은 여기 선언·미export.
 // 읽기 캐시(nodesAtom)는 패널 렌더 전용 복제본이며, 권위는 언제나 store다.
+//
+// store 키(전부 이 파일이 소유):
+//   node:<treeKey>:<id>  노드 1행(PtreeNode) — 영구 데이터의 전부
+//   link:<root>          이 root가 다른 tree를 보게 하는 연결(문자열)
+//   schema               노드행 스키마 버전(2)
+//   store:id             이 store 파일의 표식(형제 파일 중 자기 파일 식별)
+//   adopt:<파일명>        형제 store 파일을 마지막으로 흡수한 지문 {size,mtimeMs,touched}
+//   diag:<세션id>         진단 로그 최근 50건 — 턴 시작 항목은 ptree-watch.py가 박동으로 읽는다
+//   tree:<root>          레거시 v1(통째 트리). migrate가 node: 행으로 바꾸고 지운다
+// 휘발 사실(도는 중·포인터·백그라운드 작업)은 여기 없다 — session.ts의 세션 atom에만 있다.
 
 import { atom, read, update } from 'claude-code'
 import type { PtreeNode, PtreeNodesCache, PtreeDiag } from '../../types'

@@ -45,7 +45,10 @@ export type PtreeTaskSource = 'snapshot' | 'provisional'
 export type PtreeTask = { type: string; node?: string; source: PtreeTaskSource }
 export type PtreeRunningTasks = { sid: string; map: Record<string, PtreeTask> }
 
-/** 진단 로그 1건(store 키 `diag:<sessionId>`, 최근 50건). before/after = 그 훅이 쓰기 전/후의 turn.mainTurnId. */
+/**
+ * 진단 로그 1건(store 키 `diag:<sessionId>`, 최근 50건). before/after = 그 훅이 쓰기 전/후의 turn.mainTurnId.
+ * ev가 'complete'가 아닌 항목은 hooks/ptree-watch.py가 "패널이 살아 있다"는 박동으로 읽는다(`at`·`ev` 이름을 바꾸면 그쪽도).
+ */
 export type PtreeDiag = {
   at: number
   ev: 'start' | 'complete' | 'reset' | 'sstart' | 'clobber'
@@ -70,7 +73,7 @@ declare module 'claude-code' {
     }
   }
 
-  // 자기 도구의 입력 타입을 손으로 선언(생성 claude-code-mcp 스냅샷에 안 기댐).
+  // 자기 도구의 입력 타입을 손으로 선언(생성 claude-code-mcp 스냅샷에 안 기댐). hooks/lib/tools.ts의 TOOLS와 짝.
   interface McpToolInputs {
     'mcp__problem-tree__add_problem': { title: string; parentId?: string }
     'mcp__problem-tree__resolve_problem': { nodeId: string; reason: string; alsoResolves?: string[] }

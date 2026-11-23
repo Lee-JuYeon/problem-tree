@@ -4,7 +4,6 @@
 import type { PtreeNode } from '../../types'
 
 export const TITLE_MAX = 16
-export const STALE_DAYS = 2
 export const DAY = 86_400_000
 export const GC_DAYS = 30
 export const FRAME_MS = 400
@@ -257,7 +256,7 @@ export function rejectedTitle(nodes: Nodes, title: string): boolean {
   return Object.values(nodes).some(n => n.status === 'removed' && norm(n.title) === nn)
 }
 
-export const defaultRand = () => Math.random()
+const defaultRand = () => Math.random()
 
 /** 4자 무작위 id. n\d+ 꼴·이미 있는 키(묘비 포함)는 피한다. rand 주입 가능(테스트). */
 export function newId(exists: (id: string) => boolean, rand: () => number = defaultRand): string {

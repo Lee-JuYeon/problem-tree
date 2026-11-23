@@ -81,6 +81,18 @@ export async function focus($: Any, id: string, by: 'user' | 'claude'): Promise<
 
 // ---------- resolve ----------
 
+/** 노드 행을 해결 상태로. mergedInto가 있으면 "그 노드 해결로 함께 닫힘"(merge)으로 기록한다. */
+function markResolved(d: PtreeNode, now: number, by: 'user' | 'claude', mergedInto?: string): void {
+  d.status = 'resolved'
+  d.resolvedAt = now
+  d.touchedAt = now
+  if (mergedInto === undefined) d.history.push({ at: now, event: 'resolve', by })
+  else {
+    d.resolvedBy = mergedInto
+    d.history.push({ at: now, event: 'merge', by, ref: mergedInto })
+  }
+}
+
 export async function resolve(
   $: Any,
   args: { id: string; by: 'user' | 'claude'; also?: string[] },
@@ -92,25 +104,10 @@ export async function resolve(
   if (!n || n.status === 'removed') return `없는 노드: ${id}`
   if (n.status !== 'open') return `${id}는 open 상태가 아님(${n.status})`
   const s = await readSession($)
-  await patchNode($, id, (d, now) => {
-    d.status = 'resolved'
-    d.resolvedAt = now
-    d.touchedAt = now
-    d.history.push({ at: now, event: 'resolve', by })
-  })
-  const merged: string[] = []
+  await patchNode($, id, (d, now) => markResolved(d, now, by))
   for (const other of also) {
     const o = nodes[other]
-    if (o && o.status === 'open') {
-      await patchNode($, other, (d, now) => {
-        d.status = 'resolved'
-        d.resolvedAt = now
-        d.touchedAt = now
-        d.resolvedBy = id
-        d.history.push({ at: now, event: 'merge', by, ref: id })
-      })
-      merged.push(other)
-    }
+    if (o && o.status === 'open') await patchNode($, other, (d, now) => markResolved(d, now, by, id))
   }
   // pointer: 손 안 댄 열린 노드를 작업 중이면 그대로, 아니면 부모 open으로(없으면 비움).
   // 참조해석은 resolveNodeRef로만(가드 다).

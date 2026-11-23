@@ -30,13 +30,13 @@ Claude Code 세션 옆에 상주하는 **문제해결 노드트리** 패널. 긴
 | `◐` | 멈춤 | 일단락됐지만 마무리 안 된 채 멈춤 |
 | `●` | 완료 | 해결됨(원이 다 채워짐). `→nX` = 다른 노드 해결로 함께 닫힘(merge) |
 
-`⚠` = 2일 이상 방치(작업 중이면 안 붙음). 진행중·완료의 `●`는 글자는 같아도 색·굵기·움직임으로 구분된다.
+진행중·완료의 `●`는 글자는 같아도 색·굵기·움직임으로 구분된다. 백그라운드 작업이 붙은 노드는 `◇→◈→◆`로 돈다. 멈춘 지 며칠인지는 목록(`list_problems`·`/ptree list`)의 `paused Nd`로 본다.
 
 ## 쓰는 법
 
 - 패널 열기: `/ptree`
-- 커맨드: `/ptree add <제목>` · `resolve <id>` · `reopen <id>` · `focus <id>` · `rename <id> <제목>` · `rm <id>` · `move <id> [부모id]`(생략=루트로) · `note <id> <글>` · `show`(완료 노드 표시 토글) · `list`
-- Claude 자동 도구: `add_problem`(새 문제를 '계획만'으로 추가, focus는 안 뺏음. `parentId` 생략=루트, 하위 문제면 `parentId` 명시) · `move_problem`(잘못 붙은 노드를 다른 부모/루트로 옮김, 하위 노드 동행) · `focus_problem`(지금부터 이 노드 작업 선언 → 진행중) · `resolve_problem`(근거 있을 때 해결, 같이 풀린 건 `alsoResolves`) · `reopen_problem` · `rename_problem` · `list_problems`
+- 커맨드: `/ptree add <제목>` · `resolve <id>` · `reopen <id>` · `focus <id>` · `rename <id> <제목>` · `rm <id>` · `move <id> [부모id]`(생략=루트로) · `note <id> <글>` · `link <경로>`(빈 root에서만: 다른 root의 트리를 같이 봄) · `unlink` · `list`
+- Claude 도구(턴 안에서 직접 호출 — 유일한 갱신 경로): `add_problem`(새 문제를 '계획만'으로 추가, focus는 안 뺏음. `parentId` 생략=루트, 하위 문제면 `parentId` 명시) · `move_problem`(잘못 붙은 노드를 다른 부모/루트로 옮김, 하위 노드 동행) · `focus_problem`(지금부터 이 노드 작업 선언 → 진행중) · `resolve_problem`(근거 있을 때 해결, 같이 풀린 건 `alsoResolves`) · `reopen_problem` · `rename_problem` · `list_problems`
 
 ## 제목 규칙(철칙)
 
@@ -44,7 +44,9 @@ Claude Code 세션 옆에 상주하는 **문제해결 노드트리** 패널. 긴
 
 ## 저장
 
-작업 디렉터리별로 `$.store` 키 `tree:<cwd>`에 영속 저장된다. 세션이 끝나거나 컨텍스트가 요약돼도 트리가 남아 다음 세션에서 이어진다. 세션 내 반응형 미러는 `$.state`.
+영구 데이터는 **노드 행뿐**이다: 플러그인 `$.store`의 키 `node:<tree>:<id>` 하나가 노드 하나(`types/index.d.ts`의 `PtreeNode`). 쓰기는 "그 행만 읽고 고쳐 쓰기"라 통째 덮어쓰기가 없다. `<tree>`는 세션의 프로젝트 root(`$.session.root()`, 셸 `cd`로 안 변함) — 다른 root에서 같은 트리를 보려면 `/ptree link <경로>`.
+
+"지금 도는 중"·작업 포인터·백그라운드 작업 같은 **휘발 사실은 저장하지 않는다**(세션 atom에만 있고 렌더 때 계산). 세션이 끝나거나 컨텍스트가 요약돼도 노드는 남아 다음 세션에서 이어진다. 완료된 묶음은 다음 턴부터 접히고, 삭제(묘비)·완료 후 30일이 지나면 물리 삭제된다.
 
 ## 설치 식별자가 바뀌어도 노드는 남는다(고아 store 흡수)
 
@@ -81,7 +83,24 @@ Claude Code 세션 옆에 상주하는 **문제해결 노드트리** 패널. 긴
 세션별 store 키 `diag:<sessionId>`에 최근 50건(session.start마다 가장 오래된 세션부터 최대 100키만 들여다보고, 7일 지난 것·세션 수 100 초과분을 지운다 — 전수 조회 안 함). 턴 시작 항목은 패널 감시 Stop 훅이 박동으로 읽는다. 항목: `at`(ms), `ev`(start=turn.start·complete=turn.complete·reset=세션교체·sstart=session.start·clobber=loadTree가 읽는 도중 patch가 끼어 캐시를 덮어씀), `turnId`·`agentId`, `before`/`after`(그 훅 전/후 `mainTurnId`, 없으면 생략), `match`(complete의 turnId==before), `ptr`(포인터 노드), `tasks`(백그라운드 작업 수), `note`(complete=reason, reset=`옛sid→새sid`, clobber=`seq a→b`).
 읽기: `python3 -c "import json;d=json.load(open('$HOME/.claude/plugins/store/problem-tree_skills-dir-a8b1b87c1491.json'));[print(k,len(v)) for k,v in d.items() if k.startswith('diag:')]"` — 한 세션 상세는 `print(json.dumps(d['diag:<sid>'],indent=1,ensure_ascii=False))`. 범인 후보: 메인 턴 중 `complete`에 `match:false`·에이전트 아닌데 다른 turnId, `reset`/`sstart`가 턴 중간에 찍힘, `clobber`.
 
+## 구조
+
+```
+hooks/register.tsx     훅 배선만(session/turn/spawn/tool/Stop/command/render)
+hooks/pane.tsx         패널 그리기(읽기 전용)
+hooks/lib/tools.ts     MCP 도구 선언표 + 실행
+hooks/lib/command.ts   /ptree 해석·실행
+hooks/lib/ops.ts       노드 조작(add/resolve/reopen/focus/rename/move/remove/note/list)
+hooks/lib/store.ts     영속 창구 — $.store 쓰기는 여기에만(노드·link·migrate·gc·adopt·diag)
+hooks/lib/session.ts   세션 테이블 창구(turn/pointer/agentBind/runningTasks atom)
+hooks/lib/view.ts      순수 계산($ 없음: 숨김·레이아웃·불·목록·검증·id)
+hooks/ptree-watch.py   패널 감시 Stop 훅(선택, settings.json에 등록, 읽기 전용)
+```
+
+의존은 한 방향: register → tools/command/pane → ops → store/session → view. 불변식은 `tests/guards.test.tsx`가 지킨다(store 쓰기는 store.ts에만, 렌더·타이머 쓰기 0, 이벤트별 쓰기 테이블, Stop 핸들러는 절대 안 막음).
+
 ## 설계 메모
 
-- 도구의 입력 타입은 `types/index.d.ts`의 `McpToolInputs`에 **직접 선언**한다(생성 `claude-code-mcp` 스냅샷은 한 리로드 뒤처지므로 거기 기대지 않음). `tool.call` 리터럴 매처가 그 선언으로 `e`를 좁힌다.
-- 다음(M2): 한글 2셀 폭 정확 자르기, 해결 노드 아카이브, `staleDays` userConfig.
+- 도구의 입력 타입은 `types/index.d.ts`의 `McpToolInputs`에 **직접 선언**한다(생성 `claude-code-mcp` 스냅샷은 한 리로드 뒤처지므로 거기 기대지 않음). `hooks/lib/tools.ts`의 `TOOLS`와 짝이다.
+- 플랫폼 규칙: `$`는 정적으로 보이는 호출에만 넘길 수 있다(표에 담은 클로저로는 못 넘김) → 도구 실행은 이름으로 가르는 `runTool` switch.
+- 같은 이름의 플러그인은 한 벌만 로드된다. `~/.claude/skills/problem-tree`(자동 로드, `@skills-dir`)와 마켓 설치본(`@<마켓>`)이 둘 다 있으면 설치본이 이기고 store 파일도 달라진다 — 위 "고아 store 흡수"가 노드를 이어 준다.
