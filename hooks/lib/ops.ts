@@ -227,3 +227,13 @@ export async function note($: Any, id: string, text: string, by: 'user' | 'claud
   })
   return `메모 저장: ${id}`
 }
+
+// ---------- list ----------
+
+/** 지금 보이는 노드 목록 문구(store에서 새로 읽는다). 도구 list_problems와 `/ptree list`가 같이 쓴다. */
+export async function list($: Any): Promise<string> {
+  const nodes = await loadTree($)
+  const s = await readSession($)
+  const now = await $.clock.now()
+  return view.listText(nodes, now, view.hiddenSet(nodes, s.turn.cutoffAt), s)
+}

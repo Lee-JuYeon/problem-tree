@@ -10,6 +10,9 @@ import * as opsMod from '../hooks/lib/ops'
 import * as sessMod from '../hooks/lib/session'
 import * as viewMod from '../hooks/lib/view'
 import * as storeMod from '../hooks/lib/store'
+import * as toolsMod from '../hooks/lib/tools'
+import * as commandMod from '../hooks/lib/command'
+import * as paneMod from '../hooks/pane'
 
 const srcOf = (mod: Record<string, unknown>) =>
   Object.values(mod).filter(f => typeof f === 'function').map(f => (f as Function).toString()).join('\n')
@@ -28,13 +31,20 @@ test('가: $.store.set/delete·nodesAtom은 store.ts 밖에 없다(register 내�
   // ⚠ register.tsx에 비export 헬퍼를 새로 추가하면 반드시 __guardInternals 목록에도 올려라.
   //   목록 밖 헬퍼 본문엔 toString 검사가 닿지 않아 그 안의 $.store.set/delete 주입을 못 잡는다(가 가드 구멍).
   //   이 수 단언이 틀어지면(헬퍼를 추가·삭제했으면) 목록을 맞추고 이 숫자도 함께 고친다.
-  expect(Object.keys(internals).length).toBe(9)
+  expect(Object.keys(internals).length).toBe(5)
   const regInternals = Object.values(internals)
     .map((f: any) => String(f))
     .join('\n')
   // 검사가 헛돌지 않음을 보장: register 내부 헬퍼 본문이 실제로 잡혔다(bgTask가 taskProvisional 호출).
   expect(regInternals.includes('taskProvisional')).toBe(true)
-  const external = register.toString() + '\n' + regInternals + '\n' + srcOf(opsMod) + '\n' + srcOf(sessMod) + '\n' + srcOf(viewMod)
+  // store.ts를 뺀 모든 모듈.
+  const external = [
+    register.toString(), regInternals, srcOf(opsMod), srcOf(sessMod), srcOf(viewMod),
+    srcOf(toolsMod), srcOf(commandMod), srcOf(paneMod),
+  ].join('\n')
+  expect(external.includes('linkCmd') || external.includes('setLink')).toBe(true) // command 본문이 실제로 잡혔다
+  expect(external.includes('hiddenSet')).toBe(true) // pane 본문이 실제로 잡혔다
+  expect(external.includes('alsoResolves')).toBe(true) // tools(runTool) 본문이 실제로 잡혔다
   for (const token of ['.store.set', '.store.delete', 'nodesAtom']) {
     expect(external.includes(token), `외부에 ${token} 발견`).toBe(false)
   }
