@@ -29,6 +29,10 @@ export type Store = {
   fsFail?: boolean // true면 fs.list가 throw(권한 없음 모사)
   fsReads: string[]
   toasts: string[]
+  // 표면 등록 기록(특성화 테스트용)
+  commands: any[]
+  tools: any[]
+  opens: any[]
   // 테스트 주입 훅(기본 미설정 → 무동작). 다른 엔진의 동시쓰기·인터리브를 모사한다.
   onKeys?: () => void // store.keys 호출마다(get/validate 재읽기 직전 끼어들기용)
   onSet?: (key: string) => void // 각 key의 실제 store.set 직전(get과 set 사이 외부쓰기용)
@@ -56,7 +60,7 @@ export const VP = { columns: 48, rows: 30 } as const
 
 export function boot(on: On, entries?: Record<string, unknown>): Boot {
   const clock = mock.clock(on, { now: T0 })
-  const store: Store = { map: new Map(Object.entries(entries ?? {})), sets: [], deletes: [], gets: [], stateSets: 0, stateDeletes: 0, stateWrites: [], files: {}, fsLists: [], fsReads: [], toasts: [] }
+  const store: Store = { map: new Map(Object.entries(entries ?? {})), sets: [], deletes: [], gets: [], stateSets: 0, stateDeletes: 0, stateWrites: [], files: {}, fsLists: [], fsReads: [], toasts: [], commands: [], tools: [], opens: [] }
   let sid = SID
   let cwd = ROOT
   let agentSeq = 0
@@ -109,9 +113,18 @@ export function boot(on: On, entries?: Record<string, unknown>): Boot {
     return { value: undefined }
   }) as any)
 
-  on('command.register', () => ({ value: { command: 'ptree' } }))
-  on('tool.register', (_, e) => ({ value: { tool: (e as any).name } }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('command.register', (_, e) => {
+    store.commands.push(clone(e))
+    return { value: { command: 'ptree' } }
+  })
+  on('tool.register', (_, e) => {
+    store.tools.push(clone(e))
+    return { value: { tool: (e as any).name } }
+  })
+  on('ui.open', (_, e) => {
+    store.opens.push(clone(e))
+    return { value: { isPlaced: true } }
+  })
   on('session.cwd', () => ({ value: cwd }))
   on('session.root', () => ({ value: ROOT }))
   on('session.id', () => ({ value: sid }))
