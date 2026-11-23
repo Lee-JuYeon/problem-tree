@@ -180,14 +180,27 @@ test('D9: diagGc 세션 수 상한 — 최근 100개만 남기고 오래된 것�
 })
 
 // ---------- D10 ----------
-test('D10: diagGc는 한 번에 300개까지만 지운다(시작 지연 방지) — 다음 시작에서 이어서', async ($, on) => {
+test('D10: diagGc는 한 번에 100개까지만 들여다본다(전수 get 금지) — 다음 시작에서 이어서', async ($, on) => {
   const entries: Record<string, unknown> = {}
-  for (let i = 0; i < 500; i++) entries[`diag:y${i}`] = [{ at: T0 - 9 * DAY + i, ev: 'start' }] // 전부 TTL 밖
+  for (let i = 0; i < 250; i++) entries[`diag:y${i}`] = [{ at: T0 - 9 * DAY + i, ev: 'start' }] // 전부 TTL 밖
   const { store } = boot(on, entries)
   await start($)
-  expect([...store.map.keys()].filter(k => k.startsWith('diag:y')).length).toBe(200)
-  expect(store.map.has('diag:y299')).toBe(false) // 오래된 것부터
-  expect(store.map.has('diag:y300')).toBe(true)
+  expect(store.gets.filter(k => k.startsWith('diag:y')).length).toBe(100)
+  expect([...store.map.keys()].filter(k => k.startsWith('diag:y')).length).toBe(150)
+  expect(store.map.has('diag:y99')).toBe(false) // 삽입순(오래된 세션)부터
+  expect(store.map.has('diag:y100')).toBe(true)
+  await start($) // 초과 50개
+  expect([...store.map.keys()].filter(k => k.startsWith('diag:y')).length).toBe(100)
+  await start($) // 상한 안쪽: TTL 확인은 가장 오래된 20개씩
+  expect([...store.map.keys()].filter(k => k.startsWith('diag:y')).length).toBe(80)
+})
+
+// ---------- D11 ----------
+test('D11: 상한을 넘어도 최근 1시간 안에 기록한(아직 도는) 세션의 diag는 지우지 않는다', async ($, on) => {
+  const entries: Record<string, unknown> = { 'diag:live': [{ at: T0 - 60_000, ev: 'start' }] } // 가장 먼저 만들어졌지만 방금도 기록
+  for (let i = 0; i < 120; i++) entries[`diag:z${i}`] = [{ at: T0 - DAY + i, ev: 'start' }]
+  const { store } = boot(on, entries)
   await start($)
-  expect([...store.map.keys()].filter(k => k.startsWith('diag:y')).length).toBe(0)
+  expect(store.map.has('diag:live')).toBe(true)
+  expect([...store.map.keys()].filter(k => k.startsWith('diag:z')).length).toBe(100)
 })

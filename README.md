@@ -60,7 +60,7 @@ Claude Code 세션 옆에 상주하는 **문제해결 노드트리** 패널. 긴
 
 ## 진단 로그(불 꺼짐 추적용, 동작 무관)
 
-세션별 store 키 `diag:<sessionId>`에 최근 50건(7일 지난 다른 세션 키와 최근 100개를 넘는 키는 session.start에서 정리, 한 번에 300개까지). 턴 시작 항목은 Stop 훅의 패널 생존 감시가 박동으로 읽는다. 항목: `at`(ms), `ev`(start=turn.start·complete=turn.complete·reset=세션교체·sstart=session.start·clobber=loadTree가 읽는 도중 patch가 끼어 캐시를 덮어씀), `turnId`·`agentId`, `before`/`after`(그 훅 전/후 `mainTurnId`, 없으면 생략), `match`(complete의 turnId==before), `ptr`(포인터 노드), `tasks`(백그라운드 작업 수), `note`(complete=reason, reset=`옛sid→새sid`, clobber=`seq a→b`).
+세션별 store 키 `diag:<sessionId>`에 최근 50건(session.start마다 가장 오래된 세션부터 최대 100키만 들여다보고, 7일 지난 것·세션 수 100 초과분을 지운다 — 전수 조회 안 함). 턴 시작 항목은 Stop 훅의 패널 생존 감시가 박동으로 읽는다. 항목: `at`(ms), `ev`(start=turn.start·complete=turn.complete·reset=세션교체·sstart=session.start·clobber=loadTree가 읽는 도중 patch가 끼어 캐시를 덮어씀), `turnId`·`agentId`, `before`/`after`(그 훅 전/후 `mainTurnId`, 없으면 생략), `match`(complete의 turnId==before), `ptr`(포인터 노드), `tasks`(백그라운드 작업 수), `note`(complete=reason, reset=`옛sid→새sid`, clobber=`seq a→b`).
 읽기: `python3 -c "import json;d=json.load(open('$HOME/.claude/plugins/store/problem-tree_skills-dir-a8b1b87c1491.json'));[print(k,len(v)) for k,v in d.items() if k.startswith('diag:')]"` — 한 세션 상세는 `print(json.dumps(d['diag:<sid>'],indent=1,ensure_ascii=False))`. 범인 후보: 메인 턴 중 `complete`에 `match:false`·에이전트 아닌데 다른 turnId, `reset`/`sstart`가 턴 중간에 찍힘, `clobber`.
 
 ## 매 턴 끝 강제 갱신(Stop 훅 — `hooks/ptree-sync.py`)

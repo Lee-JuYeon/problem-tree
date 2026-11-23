@@ -126,3 +126,22 @@ test('A8: store:id가 없으면 한 번 만들고, 다음 시작에서 그대로
   await start($)
   expect(store.map.get('store:id')).toBe(id)
 })
+
+test('A9: 지난번에 본 행은 다시 견주지 않는다 — 옛 파일이 바뀌면 새로 바뀐 행만 get', async ($, on) => {
+  const { store } = boot(on)
+  const rows: Record<string, unknown> = {}
+  for (let i = 0; i < 30; i++) rows[nk(`r${i}`)] = row(`r${i}`, `R${i}`)
+  store.files[OLD] = file(rows)
+  await start($)
+  expect(nodeIds(store).length).toBe(30)
+  store.files[OLD] = file({ ...rows, [nk('r3')]: row('r3', 'R3-새제목', { touchedAt: T0 - 10 }), [nk('new1')]: row('new1', 'NEW') }, 2)
+  const before = store.sets.length
+  store.gets.length = 0
+  await start($)
+  // 흡수는 session.start의 첫 단계: 바뀐 기존 행(r3) 1개만 견주고, 그 다음 get은 gc/loadTree의 전체 읽기(r0부터)다.
+  expect(store.gets.filter(k => k.startsWith('node:')).slice(0, 2)).toEqual([nk('r3'), nk('r0')])
+  const adoptSets = store.sets.slice(before).filter(x => x.key.startsWith('node:')).map(x => x.key).sort()
+  expect(adoptSets).toEqual([nk('new1'), nk('r3')])
+  expect(nodeOf(store, 'r3').title).toBe('R3-새제목')
+  expect(store.map.get(`adopt:${OLD}`)).toMatchObject({ touched: T0 - 10 })
+})

@@ -279,6 +279,7 @@ export function adoptSiblings($: Any): Promise<AdoptResult> {
     const dir = await storeDir($)
     if (!dir) return out
     const entries: any[] = await $.fs.list(dir)
+    const own = new Set<string>(await $.store.keys())
     let selfId = await $.store.get(STORE_ID_KEY)
     if (typeof selfId !== 'string') {
       selfId = `${(await $.clock.now()).toString(36)}-${Math.random().toString(36).slice(2, 10)}`
@@ -288,6 +289,9 @@ export function adoptSiblings($: Any): Promise<AdoptResult> {
       if (!e || e.kind !== 'file' || e.isLink || !STORE_FILE_RE.test(String(e.name))) continue
       const mark = (await $.store.get(adoptKey(e.name))) as any
       if (mark && mark.size === e.size && mark.mtimeMs === e.mtimeMs) continue
+      // 지난번 흡수 때 본 가장 새 touchedAt. 그 뒤로 안 바뀐 행은 다시 견주지 않는다(get 절약).
+      const seen: number = mark && typeof mark.touched === 'number' ? mark.touched : -Infinity
+      let touched = seen
       let data: any
       try {
         if (e.size > ADOPT_MAX_BYTES) throw new Error('too large')
@@ -302,17 +306,24 @@ export function adoptSiblings($: Any): Promise<AdoptResult> {
       for (const [k, v] of Object.entries(data)) {
         if (k.startsWith('node:')) {
           if (!isNodeRow(v) || !k.endsWith(`:${v.id}`)) continue
-          const cur = (await $.store.get(k)) as PtreeNode | undefined
-          if (cur && !((v.touchedAt ?? 0) > (cur.touchedAt ?? 0))) continue
+          const t = typeof v.touchedAt === 'number' ? v.touchedAt : 0
+          if (t > touched) touched = t
+          if (t <= seen && own.has(k)) continue
+          const cur = own.has(k) ? ((await $.store.get(k)) as PtreeNode | undefined) : undefined
+          if (cur && !(t > (cur.touchedAt ?? 0))) continue
+          own.add(k)
           await $.store.set(k, { ...v, history: v.history.slice(-20) })
           n++
         } else if (k.startsWith('link:')) {
-          if (typeof v !== 'string' || (await $.store.get(k)) !== undefined) continue
+          if (typeof v !== 'string' || own.has(k)) continue
+          own.add(k)
           await $.store.set(k, v)
           n++
         }
       }
-      if (n > 0 || !mark) await $.store.set(adoptKey(e.name), { size: e.size, mtimeMs: e.mtimeMs })
+      await $.store.set(adoptKey(e.name), {
+        size: e.size, mtimeMs: e.mtimeMs, ...(touched > -Infinity ? { touched } : {}),
+      })
       if (n > 0) {
         out.adopted += n
         out.files.push(e.name)
@@ -331,8 +342,13 @@ const DIAG_GC_MS = 7 * DAY
 // 세션 수 상한: `claude -p` 배치처럼 세션이 수천 개면 7일 TTL만으로는 store가 4 MiB 상한
 // (넘으면 모든 $.store.set 거부 = 노드 쓰기 불능)에 닿는다. 최근 것만 남긴다.
 const DIAG_KEEP = 100
-// 한 번의 session.start가 지우는 키 수 상한(삭제마다 store 파일 재기록 → 시작 지연 방지). 여러 세션에 걸쳐 수렴.
-const DIAG_GC_BATCH = 300
+// 한 번의 session.start가 들여다보는(get) 키 수 상한. store 연산 비용은 store 크기에 비례하므로
+// (실측: diag 5,925키·4MB에서 키마다 get 하던 옛 GC가 세션 시작에 CPU 1분+) 전수 조사하지 않는다.
+const DIAG_GC_BATCH = 100
+// 상한 안쪽이어도 TTL 만료를 확인해 볼 "가장 오래된" 키 수.
+const DIAG_TTL_PROBE = 20
+// 상한을 넘어도 지우지 않는 "아직 도는 세션" 기준(마지막 항목이 이 안쪽). Stop 훅이 박동으로 읽는다.
+const DIAG_ACTIVE_MS = 3_600_000
 const diagKey = (sid: string) => `diag:${sid}`
 
 /** 항목 1건을 diag:<sid> 끝에 붙이고 최근 50건만 남긴다(직렬 큐 경유, 실패는 삼킴). */
@@ -357,30 +373,25 @@ export function diagPush($: Any, sid: string, entry: PtreeDiag): Promise<void> {
 }
 
 /**
- * 다른 세션의 diag: 키를 정리한다: 마지막 항목이 7일보다 오래됐거나 형식이 이상한 것,
- * 그리고 최근순 DIAG_KEEP개를 넘는 것. 한 번에 DIAG_GC_BATCH개까지만 지운다(오래된 것부터).
+ * 다른 세션의 diag: 키를 정리한다. `$.store.keys()`는 삽입순(=세션이 처음 기록한 순)이라
+ * 앞쪽이 가장 오래된 세션이다. 앞에서부터 최대 DIAG_GC_BATCH개만 읽어 본다(전수 get 금지):
+ * - 형식이 이상하거나 마지막 항목이 7일보다 오래됨 → 삭제
+ * - 세션 수가 DIAG_KEEP을 넘는 만큼의 앞쪽 키 → 삭제(단, 최근 1시간 안에 기록한 세션은 남김)
+ * 남은 초과분은 다음 session.start들이 이어서 지운다.
  */
 export async function diagGc($: Any, ownSid: string): Promise<void> {
   try {
     const now = await $.clock.now()
     const own = diagKey(ownSid)
-    const keys: string[] = await $.store.keys()
-    const rows: { k: string; at: number }[] = []
-    for (const k of keys) {
-      if (!k.startsWith('diag:') || k === own) continue
+    const keys = ((await $.store.keys()) as string[]).filter(k => k.startsWith('diag:') && k !== own)
+    const over = Math.max(0, keys.length - DIAG_KEEP)
+    const probe = Math.min(keys.length, DIAG_GC_BATCH, Math.max(over, DIAG_TTL_PROBE))
+    for (let i = 0; i < probe; i++) {
+      const k = keys[i]!
       const v = await $.store.get(k)
       const last = Array.isArray(v) && v.length > 0 ? v[v.length - 1] : undefined
-      rows.push({ k, at: last && typeof last.at === 'number' ? last.at : -Infinity })
-    }
-    rows.sort((a, b) => a.at - b.at) // 오래된 것부터
-    const over = Math.max(0, rows.length - DIAG_KEEP)
-    let budget = DIAG_GC_BATCH
-    for (let i = 0; i < rows.length && budget > 0; i++) {
-      const r = rows[i]!
-      if (r.at < now - DIAG_GC_MS || i < over) {
-        await $.store.delete(r.k)
-        budget--
-      }
+      const at = last && typeof last.at === 'number' ? last.at : undefined
+      if (at === undefined || at < now - DIAG_GC_MS || (i < over && at < now - DIAG_ACTIVE_MS)) await $.store.delete(k)
     }
   } catch {
     /* 진단 정리 실패는 삼킴 */

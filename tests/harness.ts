@@ -19,6 +19,7 @@ export type Store = {
   map: Map<string, unknown>
   sets: { key: string; value: unknown }[]
   deletes: string[]
+  gets: string[] // store.get된 키(전수 조회 금지 검증용)
   stateSets: number
   stateDeletes: number
   stateWrites: string[] // state.set된 atom 키(이벤트별 쓰기표 검증용)
@@ -55,14 +56,17 @@ export const VP = { columns: 48, rows: 30 } as const
 
 export function boot(on: On, entries?: Record<string, unknown>): Boot {
   const clock = mock.clock(on, { now: T0 })
-  const store: Store = { map: new Map(Object.entries(entries ?? {})), sets: [], deletes: [], stateSets: 0, stateDeletes: 0, stateWrites: [], files: {}, fsLists: [], fsReads: [], toasts: [] }
+  const store: Store = { map: new Map(Object.entries(entries ?? {})), sets: [], deletes: [], gets: [], stateSets: 0, stateDeletes: 0, stateWrites: [], files: {}, fsLists: [], fsReads: [], toasts: [] }
   let sid = SID
   let cwd = ROOT
   let agentSeq = 0
   let bgSeq = 0
   let lastBg = ''
 
-  on('store.get', (_, e) => ({ value: store.map.has(e.key) ? clone(store.map.get(e.key)) : undefined }))
+  on('store.get', (_, e) => {
+    store.gets.push(e.key)
+    return { value: store.map.has(e.key) ? clone(store.map.get(e.key)) : undefined }
+  })
   on('store.set', (_, e) => {
     store.onSet?.(e.key)
     const v = clone((e as any).value)
