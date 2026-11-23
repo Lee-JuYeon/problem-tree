@@ -46,9 +46,21 @@ Claude Code 세션 옆에 상주하는 **문제해결 노드트리** 패널. 긴
 
 작업 디렉터리별로 `$.store` 키 `tree:<cwd>`에 영속 저장된다. 세션이 끝나거나 컨텍스트가 요약돼도 트리가 남아 다음 세션에서 이어진다. 세션 내 반응형 미러는 `$.state`.
 
+## 설치 식별자가 바뀌어도 노드는 남는다(고아 store 흡수)
+
+`$.store` 파일은 Claude Code가 고르는 **로드 식별자**마다 따로다: `~/.claude/skills/problem-tree`에서 자동 로드되면 `problem-tree_skills-dir-<해시>.json`, 마켓으로 설치하면 `problem-tree_<마켓>-<해시>.json`. 같은 이름의 설치본이 생기면 skills-dir 사본은 로드되지 않으므로(`claude plugin list`에 "Not loaded — name already taken"), 설치·제거만으로 store 파일이 바뀌고 옛 노드가 화면에서 사라졌다.
+
+그래서 `session.start`마다 store 디렉터리의 형제 파일(`problem-tree_*.json`)을 읽어 `node:`/`link:` 행을 자기 store로 흡수한다. 같은 id는 `touchedAt`이 더 새 쪽, 파일별 지문(`adopt:<파일명>`=size·mtime)이 같으면 다시 읽지 않는다. 못 읽은 파일(4 MiB 초과·깨진 JSON)은 토스트로 알린다. `diag:`·레거시 `tree:`는 옮기지 않는다.
+
+## 패널 생존 감시(Stop 훅)
+
+플러그인이 세션 도중 언로드되면 패널·MCP 도구는 사라지는데 `settings.json`에 등록된 Stop 훅은 계속 돌아, "데이터는 쌓이는데 화면엔 없음"이 몇 시간씩 신호 없이 이어질 수 있다. `ptree-sync.py`는 매 Stop마다 이 세션의 `diag:<세션id>` 박동(플러그인이 턴 시작마다 씀)이 직전 Stop 이후에 있었는지 보고, 없으면 그 턴에 바로 `systemMessage`로 경고한다(같은 세션 10분에 한 번, Stop은 막지 않음). 플러그인이 직접 돌린 사본(`CLAUDE_PLUGIN_ROOT` 있음)은 판정하지 않는다. 상태 파일: `~/.claude/plugins/data/problem-tree-hook/state.json`.
+
+테스트: `claude plugin test .`(모듈) · `python3 tests/hook_test.py`(Stop 훅).
+
 ## 진단 로그(불 꺼짐 추적용, 동작 무관)
 
-세션별 store 키 `diag:<sessionId>`에 최근 50건(7일 지난 다른 세션 키는 session.start에서 정리). 항목: `at`(ms), `ev`(start=turn.start·complete=turn.complete·reset=세션교체·sstart=session.start·clobber=loadTree가 읽는 도중 patch가 끼어 캐시를 덮어씀), `turnId`·`agentId`, `before`/`after`(그 훅 전/후 `mainTurnId`, 없으면 생략), `match`(complete의 turnId==before), `ptr`(포인터 노드), `tasks`(백그라운드 작업 수), `note`(complete=reason, reset=`옛sid→새sid`, clobber=`seq a→b`).
+세션별 store 키 `diag:<sessionId>`에 최근 50건(7일 지난 다른 세션 키와 최근 100개를 넘는 키는 session.start에서 정리, 한 번에 300개까지). 턴 시작 항목은 Stop 훅의 패널 생존 감시가 박동으로 읽는다. 항목: `at`(ms), `ev`(start=turn.start·complete=turn.complete·reset=세션교체·sstart=session.start·clobber=loadTree가 읽는 도중 patch가 끼어 캐시를 덮어씀), `turnId`·`agentId`, `before`/`after`(그 훅 전/후 `mainTurnId`, 없으면 생략), `match`(complete의 turnId==before), `ptr`(포인터 노드), `tasks`(백그라운드 작업 수), `note`(complete=reason, reset=`옛sid→새sid`, clobber=`seq a→b`).
 읽기: `python3 -c "import json;d=json.load(open('$HOME/.claude/plugins/store/problem-tree_skills-dir-a8b1b87c1491.json'));[print(k,len(v)) for k,v in d.items() if k.startswith('diag:')]"` — 한 세션 상세는 `print(json.dumps(d['diag:<sid>'],indent=1,ensure_ascii=False))`. 범인 후보: 메인 턴 중 `complete`에 `match:false`·에이전트 아닌데 다른 turnId, `reset`/`sstart`가 턴 중간에 찍힘, `clobber`.
 
 ## 매 턴 끝 강제 갱신(Stop 훅 — `hooks/ptree-sync.py`)

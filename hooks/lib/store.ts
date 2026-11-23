@@ -241,11 +241,98 @@ export async function migrate($: Any): Promise<void> {
   await writeCache($, tree, await loadNodesRaw($))
 }
 
+// ---------- adopt (session.start마다: 다른 설치 식별자의 store에 고아가 된 노드 흡수) ----------
+// 전제: `$.store` 파일은 Claude Code가 고르는 **로드 식별자**(`problem-tree_<source>-<hash>.json` —
+// skills-dir 자동로드 / 마켓 설치 / --plugin-dir)마다 따로다. 식별자는 재설치·소스 이동으로 바뀌는
+// 휘발 사실인데 노드는 영구 데이터 → 식별자가 바뀌면 옛 파일의 노드가 "안 보이는 고아"가 된다.
+// 그래서 같은 플러그인의 형제 store 파일을 읽어 node:/link: 행을 자기 store로 흡수한다(행 단위,
+// 없으면 복사·있으면 touchedAt이 더 새 쪽). diag:/schema/레거시 tree:는 옮기지 않는다.
+
+const STORE_FILE_RE = /^problem-tree_[A-Za-z0-9._-]+\.json$/ // 경로 구분자 불가 → 디렉터리 탈출 없음
+const ADOPT_MAX_BYTES = 4 * 1024 * 1024 // $.fs.read 상한(4 MiB)
+const adoptKey = (name: string) => `adopt:${name}`
+const STORE_ID_KEY = 'store:id' // 이 store 파일의 표식(형제 목록에서 자기 파일을 알아보는 용도)
+
+export type AdoptResult = { adopted: number; files: string[]; skipped: string[] }
+
+/** store 디렉터리(절대경로). CLAUDE_CONFIG_DIR 우선, 없으면 $HOME/.claude. 못 구하면 undefined. */
+async function storeDir($: Any): Promise<string | undefined> {
+  const cfg = await $.env.get('CLAUDE_CONFIG_DIR')
+  if (cfg) return `${cfg}/plugins/store`
+  const home = await $.env.get('HOME')
+  return home ? `${home}/.claude/plugins/store` : undefined
+}
+
+const isNodeRow = (v: any): v is PtreeNode =>
+  !!v && typeof v === 'object' && typeof v.id === 'string' && typeof v.title === 'string' &&
+  (v.status === 'open' || v.status === 'resolved' || v.status === 'removed') && Array.isArray(v.history)
+
+/**
+ * 형제 store 파일들의 node:/link: 행을 자기 store로 흡수한다.
+ * - 파일별 `adopt:<파일명>`={size,mtimeMs} 지문이 같으면 다시 읽지 않는다(GC된 행 부활·재읽기 방지).
+ * - 자기 파일도 목록에 섞여 있다(자기 파일명은 알 길이 없다). `store:id` 표식이 같으면 자기 파일 → 건너뛴다.
+ * - 못 읽은 파일(4 MiB 초과·깨진 JSON)은 skipped로 돌려 호출부가 사용자에게 알린다(조용한 고아 금지).
+ */
+export function adoptSiblings($: Any): Promise<AdoptResult> {
+  return enqueue(async () => {
+    const out: AdoptResult = { adopted: 0, files: [], skipped: [] }
+    const dir = await storeDir($)
+    if (!dir) return out
+    const entries: any[] = await $.fs.list(dir)
+    let selfId = await $.store.get(STORE_ID_KEY)
+    if (typeof selfId !== 'string') {
+      selfId = `${(await $.clock.now()).toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+      await $.store.set(STORE_ID_KEY, selfId)
+    }
+    for (const e of entries) {
+      if (!e || e.kind !== 'file' || e.isLink || !STORE_FILE_RE.test(String(e.name))) continue
+      const mark = (await $.store.get(adoptKey(e.name))) as any
+      if (mark && mark.size === e.size && mark.mtimeMs === e.mtimeMs) continue
+      let data: any
+      try {
+        if (e.size > ADOPT_MAX_BYTES) throw new Error('too large')
+        data = JSON.parse(await $.fs.read(`${dir}/${e.name}`))
+        if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('not an object')
+      } catch {
+        out.skipped.push(e.name)
+        continue
+      }
+      if (data[STORE_ID_KEY] === selfId) continue // 자기 파일
+      let n = 0
+      for (const [k, v] of Object.entries(data)) {
+        if (k.startsWith('node:')) {
+          if (!isNodeRow(v) || !k.endsWith(`:${v.id}`)) continue
+          const cur = (await $.store.get(k)) as PtreeNode | undefined
+          if (cur && !((v.touchedAt ?? 0) > (cur.touchedAt ?? 0))) continue
+          await $.store.set(k, { ...v, history: v.history.slice(-20) })
+          n++
+        } else if (k.startsWith('link:')) {
+          if (typeof v !== 'string' || (await $.store.get(k)) !== undefined) continue
+          await $.store.set(k, v)
+          n++
+        }
+      }
+      if (n > 0 || !mark) await $.store.set(adoptKey(e.name), { size: e.size, mtimeMs: e.mtimeMs })
+      if (n > 0) {
+        out.adopted += n
+        out.files.push(e.name)
+        patchSeq++
+      }
+    }
+    return out
+  })
+}
+
 // ---------- 진단 로그(diag:<sid>, 세션별 최근 50건) ----------
 // 불(점등) 동작과 무관한 기록 전용. 절대 throw하지 않고 큐도 오염시키지 않는다.
 
 const DIAG_MAX = 50
 const DIAG_GC_MS = 7 * DAY
+// 세션 수 상한: `claude -p` 배치처럼 세션이 수천 개면 7일 TTL만으로는 store가 4 MiB 상한
+// (넘으면 모든 $.store.set 거부 = 노드 쓰기 불능)에 닿는다. 최근 것만 남긴다.
+const DIAG_KEEP = 100
+// 한 번의 session.start가 지우는 키 수 상한(삭제마다 store 파일 재기록 → 시작 지연 방지). 여러 세션에 걸쳐 수렴.
+const DIAG_GC_BATCH = 300
 const diagKey = (sid: string) => `diag:${sid}`
 
 /** 항목 1건을 diag:<sid> 끝에 붙이고 최근 50건만 남긴다(직렬 큐 경유, 실패는 삼킴). */
@@ -269,18 +356,31 @@ export function diagPush($: Any, sid: string, entry: PtreeDiag): Promise<void> {
   }
 }
 
-/** 다른 세션의 diag: 키 중 마지막 항목이 7일보다 오래됐거나 형식이 이상한 것을 지운다. */
+/**
+ * 다른 세션의 diag: 키를 정리한다: 마지막 항목이 7일보다 오래됐거나 형식이 이상한 것,
+ * 그리고 최근순 DIAG_KEEP개를 넘는 것. 한 번에 DIAG_GC_BATCH개까지만 지운다(오래된 것부터).
+ */
 export async function diagGc($: Any, ownSid: string): Promise<void> {
   try {
     const now = await $.clock.now()
     const own = diagKey(ownSid)
     const keys: string[] = await $.store.keys()
+    const rows: { k: string; at: number }[] = []
     for (const k of keys) {
       if (!k.startsWith('diag:') || k === own) continue
       const v = await $.store.get(k)
       const last = Array.isArray(v) && v.length > 0 ? v[v.length - 1] : undefined
-      const at = last && typeof last.at === 'number' ? last.at : undefined
-      if (at === undefined || at < now - DIAG_GC_MS) await $.store.delete(k)
+      rows.push({ k, at: last && typeof last.at === 'number' ? last.at : -Infinity })
+    }
+    rows.sort((a, b) => a.at - b.at) // 오래된 것부터
+    const over = Math.max(0, rows.length - DIAG_KEEP)
+    let budget = DIAG_GC_BATCH
+    for (let i = 0; i < rows.length && budget > 0; i++) {
+      const r = rows[i]!
+      if (r.at < now - DIAG_GC_MS || i < over) {
+        await $.store.delete(r.k)
+        budget--
+      }
     }
   } catch {
     /* 진단 정리 실패는 삼킴 */

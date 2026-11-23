@@ -3,7 +3,7 @@
 
 import type { Register, Timer } from 'claude-code'
 import {
-  readCache, loadTree, migrate, gc, treeOf, setLink, clearLink, targetHasLink, diagPush, diagGc,
+  readCache, loadTree, migrate, gc, treeOf, setLink, clearLink, targetHasLink, diagPush, diagGc, adoptSiblings,
 } from './lib/store'
 import {
   ensureSession, tasksReplace, ensureCutoff, turnStart, turnEnd, taskDrop,
@@ -58,6 +58,19 @@ async function bgTask($: any, e: any, next: any, kind: 'shell' | 'workflow') {
     /* 통과 */
   }
   return r
+}
+
+// 다른 설치 식별자(skills-dir ↔ 마켓 설치 등)의 store에 남은 노드를 흡수한다. 실패해도 세션 시작은
+// 막지 않되, 못 읽은 store가 있으면 조용히 넘기지 않고 사용자에게 알린다.
+async function adoptOrphans($: any) {
+  try {
+    const r = await adoptSiblings($)
+    if (r.adopted > 0) $.ui.toast(`문제트리: 다른 설치의 store에서 ${r.adopted}행을 가져왔습니다 (${r.files.join(', ')})`)
+    if (r.skipped.length > 0)
+      $.ui.toast(`문제트리: 읽지 못한 옛 store가 있습니다(노드가 안 보일 수 있음): ${r.skipped.join(', ')}`)
+  } catch {
+    /* fs 접근 불가(권한·환경) — 자기 store만으로 계속 */
+  }
 }
 
 async function registerSurface($: any) {
@@ -144,6 +157,7 @@ export const register: Register = on => {
     await tasksReplace($, {})
     const now = await $.clock.now()
     await ensureCutoff($, now)
+    await adoptOrphans($)
     await migrate($)
     await gc($)
     await loadTree($)
@@ -447,5 +461,5 @@ async function unlinkCmd($: any): Promise<string> {
 // 실기기 fs가 테스트 런타임에 없어 파일 전체 텍스트를 못 읽으므로, 이 집합의 toString으로
 // register 내부 헬퍼(bgTask 등)에 `$.store.set` 주입이 없음을 검사한다. 런타임 동작엔 영향 없음.
 export const __guardInternals = {
-  bgTask, afterWrite, ensureTimer, registerSurface, linkCmd, unlinkCmd, str, strArr,
+  bgTask, afterWrite, ensureTimer, registerSurface, adoptOrphans, linkCmd, unlinkCmd, str, strArr,
 }

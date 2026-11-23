@@ -88,11 +88,17 @@ test('D5: loadTree 읽기 도중 patchNode가 끼면 clobber 1건', async ($, on
   store.onSet = (k: string) => {
     if (k.startsWith('node:')) release()
   }
+  let gated = false
   store.keysGate = () => {
     store.keysGate = undefined // 첫 keys(list의 loadTree)만 붙잡는다
+    gated = true
     return gate
   }
-  await Promise.all([call($, 'list_problems', {}), call($, 'focus_problem', { nodeId: x })])
+  // list가 게이트에 걸린 걸 확인한 뒤에 focus를 쏜다. 둘을 동시에 쏘면 엔진 버전에 따라 focus의
+  // loadTree(keys)가 먼저 게이트에 걸려 스스로를 못 풀고 멈춘다(2.1.328+에서 실제로 그랬다).
+  const listing = call($, 'list_problems', {})
+  while (!gated) await new Promise(r => (globalThis as any).setTimeout(r, 5))
+  await Promise.all([listing, call($, 'focus_problem', { nodeId: x })])
   store.onSet = undefined
   const c = evs(store, 'clobber')
   expect(c.length).toBe(1)
@@ -157,4 +163,31 @@ test('D8: diagGc — 8일 전 diag:old 삭제, 1일 전 유지, 자기 키 유�
   expect(store.map.has('diag:recent')).toBe(true)
   expect(store.map.has('diag:s1')).toBe(true)
   expect(diag(store).map(d => d.ev)).toEqual(['start', 'reset', 'sstart']) // 옛 1건 + reset + sstart
+})
+
+// ---------- D9 ----------
+test('D9: diagGc 세션 수 상한 — 최근 100개만 남기고 오래된 것부터 지운다(자기 키 유지)', async ($, on) => {
+  const entries: Record<string, unknown> = {}
+  for (let i = 0; i < 130; i++) entries[`diag:x${i}`] = [{ at: T0 - DAY + i, ev: 'start' }] // 전부 TTL 안쪽
+  const { store } = boot(on, entries)
+  await start($)
+  const left = [...store.map.keys()].filter(k => k.startsWith('diag:x'))
+  expect(left.length).toBe(100)
+  expect(store.map.has('diag:x0')).toBe(false)
+  expect(store.map.has('diag:x29')).toBe(false)
+  expect(store.map.has('diag:x30')).toBe(true)
+  expect(store.map.has('diag:s1')).toBe(true)
+})
+
+// ---------- D10 ----------
+test('D10: diagGc는 한 번에 300개까지만 지운다(시작 지연 방지) — 다음 시작에서 이어서', async ($, on) => {
+  const entries: Record<string, unknown> = {}
+  for (let i = 0; i < 500; i++) entries[`diag:y${i}`] = [{ at: T0 - 9 * DAY + i, ev: 'start' }] // 전부 TTL 밖
+  const { store } = boot(on, entries)
+  await start($)
+  expect([...store.map.keys()].filter(k => k.startsWith('diag:y')).length).toBe(200)
+  expect(store.map.has('diag:y299')).toBe(false) // 오래된 것부터
+  expect(store.map.has('diag:y300')).toBe(true)
+  await start($)
+  expect([...store.map.keys()].filter(k => k.startsWith('diag:y')).length).toBe(0)
 })

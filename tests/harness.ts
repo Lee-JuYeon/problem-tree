@@ -22,6 +22,12 @@ export type Store = {
   stateSets: number
   stateDeletes: number
   stateWrites: string[] // state.set된 atom 키(이벤트별 쓰기표 검증용)
+  // 형제 store 파일 목(파일명 → 내용). adoptSiblings가 fs.list/fs.read로 본다.
+  files: Record<string, { text: string; size?: number; mtimeMs?: number }>
+  fsLists: string[]
+  fsFail?: boolean // true면 fs.list가 throw(권한 없음 모사)
+  fsReads: string[]
+  toasts: string[]
   // 테스트 주입 훅(기본 미설정 → 무동작). 다른 엔진의 동시쓰기·인터리브를 모사한다.
   onKeys?: () => void // store.keys 호출마다(get/validate 재읽기 직전 끼어들기용)
   onSet?: (key: string) => void // 각 key의 실제 store.set 직전(get과 set 사이 외부쓰기용)
@@ -49,7 +55,7 @@ export const VP = { columns: 48, rows: 30 } as const
 
 export function boot(on: On, entries?: Record<string, unknown>): Boot {
   const clock = mock.clock(on, { now: T0 })
-  const store: Store = { map: new Map(Object.entries(entries ?? {})), sets: [], deletes: [], stateSets: 0, stateDeletes: 0, stateWrites: [] }
+  const store: Store = { map: new Map(Object.entries(entries ?? {})), sets: [], deletes: [], stateSets: 0, stateDeletes: 0, stateWrites: [], files: {}, fsLists: [], fsReads: [], toasts: [] }
   let sid = SID
   let cwd = ROOT
   let agentSeq = 0
@@ -78,6 +84,25 @@ export function boot(on: On, entries?: Record<string, unknown>): Boot {
     store.stateSets++
     store.stateWrites.push((e as any).ref?.key ?? (e as any).key ?? '?')
     return next(e)
+  }) as any)
+
+  // 형제 store 흡수(adoptSiblings)용 fs/env 기본 목: 실제 디스크를 절대 안 읽게 빈 디렉터리로 답한다.
+  on('env.get', ((_: any, e: any) => ({ value: e.name === 'HOME' ? '/home/u' : undefined })) as any)
+  on('fs.list', ((_: any, e: any) => {
+    store.fsLists.push(e.path)
+    if (store.fsFail) throw new Error('EACCES')
+    return { value: Object.entries(store.files).map(([name, f]) => ({ name, kind: 'file', isLink: false, size: f.size ?? f.text.length, mtimeMs: f.mtimeMs ?? 1 })) }
+  }) as any)
+  on('fs.read', ((_: any, e: any) => {
+    const name = String(e.path).split('/').pop()!
+    store.fsReads.push(e.path)
+    const f = store.files[name]
+    if (!f) throw new Error('ENOENT')
+    return { value: f.text }
+  }) as any)
+  on('ui.toast', ((_: any, e: any) => {
+    store.toasts.push(String(e.text))
+    return { value: undefined }
   }) as any)
 
   on('command.register', () => ({ value: { command: 'ptree' } }))
