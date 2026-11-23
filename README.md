@@ -52,26 +52,34 @@ Claude Code 세션 옆에 상주하는 **문제해결 노드트리** 패널. 긴
 
 그래서 `session.start`마다 store 디렉터리의 형제 파일(`problem-tree_*.json`)을 읽어 `node:`/`link:` 행을 자기 store로 흡수한다. 같은 id는 `touchedAt`이 더 새 쪽, 파일별 지문(`adopt:<파일명>`=size·mtime)이 같으면 다시 읽지 않는다. 못 읽은 파일(4 MiB 초과·깨진 JSON)은 토스트로 알린다. `diag:`·레거시 `tree:`는 옮기지 않는다.
 
-## 패널 생존 감시(Stop 훅)
+## 패널 감시 Stop 훅(`hooks/ptree-watch.py`, 선택·읽기 전용)
 
-플러그인이 세션 도중 언로드되면 패널·MCP 도구는 사라지는데 `settings.json`에 등록된 Stop 훅은 계속 돌아, "데이터는 쌓이는데 화면엔 없음"이 몇 시간씩 신호 없이 이어질 수 있다. `ptree-sync.py`는 매 Stop마다 이 세션의 `diag:<세션id>` 박동(플러그인이 턴 시작마다 씀)이 직전 Stop 이후에 있었는지 보고, 없으면 그 턴에 바로 `systemMessage`로 경고한다(같은 세션 10분에 한 번, Stop은 막지 않음). 플러그인이 직접 돌린 사본(`CLAUDE_PLUGIN_ROOT` 있음)은 판정하지 않는다. 상태 파일: `~/.claude/plugins/data/problem-tree-hook/state.json`.
+플러그인이 세션 도중 언로드되면 패널·MCP 도구가 사라지는데 아무 신호가 없다. 플러그인 자신의 훅은 같이 내려가므로, 이 감시는 **`settings.json`에 직접 등록**해야 한다:
+
+```json
+{"hooks": {"Stop": [{"hooks": [{"type": "command", "timeout": 10,
+  "command": "python3 ~/.claude/skills/problem-tree/hooks/ptree-watch.py"}]}]}}
+```
+
+- **패널 생존:** 플러그인은 살아 있는 동안 매 턴 시작에 `diag:<세션id>`에 한 줄을 쓴다(박동). 직전 Stop 이후 박동이 없으면 그 턴에 바로 `systemMessage`로 경고한다(같은 세션 10분에 한 번, Stop은 막지 않음).
+- **폐지된 숨김 주석:** 변경(add/resolve/rename)이 담긴 `<!--PTREE …-->` 주석이 아직 들어오면 "반영 안 됐다, MCP 도구로 직접 반영하라"고 한 번 되돌려 보낸다(같은 주석은 1회, 빈 주석·주석 없음은 무시).
+- 플러그인 store에는 **절대 쓰지 않는다.** 쓰는 파일은 자기 상태 파일 `~/.claude/plugins/data/problem-tree-hook/state.json` 하나(원자적 교체).
+
+### 왜 숨김 주석 + 백그라운드 훅 동기화를 없앴나
+
+예전엔 Claude가 응답 끝에 숨김 주석을 남기면 Stop 훅이 transcript를 긁어 store 파일을 직접 고쳤고, 주석이 없으면 Stop을 막아 강제했다. 폐지 사유:
+- **flush race:** 마지막 응답 블록은 Stop 훅보다 늦게 transcript에 써진다 → 그 턴의 지시를 못 보고 ±1턴 늦게, 때로는 영영 반영 안 됨(조용한 실패).
+- **두 번째 쓰기 주체:** 훅이 `$.store` 파일을 밖에서 통째로 다시 썼다 → 플러그인의 행 단위 쓰기와 경합(나중 쓴 쪽이 이김), 훅은 "노드가 있는 첫 파일"을 골라 플러그인이 보는 store와 다른 파일에 쓸 수 있었다.
+- **신뢰경계:** assistant 글에 인용된 주석(읽은 파일·웹 내용)도 지시로 실행됐다.
+
+지금은 **턴 안에서 MCP 도구를 직접 부른다**(`add_problem`·`resolve_problem`·…). 즉시·가시·단일 쓰기 경로(`store.ts`)다.
 
 테스트: `claude plugin test .`(모듈) · `python3 tests/hook_test.py`(Stop 훅).
 
 ## 진단 로그(불 꺼짐 추적용, 동작 무관)
 
-세션별 store 키 `diag:<sessionId>`에 최근 50건(session.start마다 가장 오래된 세션부터 최대 100키만 들여다보고, 7일 지난 것·세션 수 100 초과분을 지운다 — 전수 조회 안 함). 턴 시작 항목은 Stop 훅의 패널 생존 감시가 박동으로 읽는다. 항목: `at`(ms), `ev`(start=turn.start·complete=turn.complete·reset=세션교체·sstart=session.start·clobber=loadTree가 읽는 도중 patch가 끼어 캐시를 덮어씀), `turnId`·`agentId`, `before`/`after`(그 훅 전/후 `mainTurnId`, 없으면 생략), `match`(complete의 turnId==before), `ptr`(포인터 노드), `tasks`(백그라운드 작업 수), `note`(complete=reason, reset=`옛sid→새sid`, clobber=`seq a→b`).
+세션별 store 키 `diag:<sessionId>`에 최근 50건(session.start마다 가장 오래된 세션부터 최대 100키만 들여다보고, 7일 지난 것·세션 수 100 초과분을 지운다 — 전수 조회 안 함). 턴 시작 항목은 패널 감시 Stop 훅이 박동으로 읽는다. 항목: `at`(ms), `ev`(start=turn.start·complete=turn.complete·reset=세션교체·sstart=session.start·clobber=loadTree가 읽는 도중 patch가 끼어 캐시를 덮어씀), `turnId`·`agentId`, `before`/`after`(그 훅 전/후 `mainTurnId`, 없으면 생략), `match`(complete의 turnId==before), `ptr`(포인터 노드), `tasks`(백그라운드 작업 수), `note`(complete=reason, reset=`옛sid→새sid`, clobber=`seq a→b`).
 읽기: `python3 -c "import json;d=json.load(open('$HOME/.claude/plugins/store/problem-tree_skills-dir-a8b1b87c1491.json'));[print(k,len(v)) for k,v in d.items() if k.startswith('diag:')]"` — 한 세션 상세는 `print(json.dumps(d['diag:<sid>'],indent=1,ensure_ascii=False))`. 범인 후보: 메인 턴 중 `complete`에 `match:false`·에이전트 아닌데 다른 turnId, `reset`/`sstart`가 턴 중간에 찍힘, `clobber`.
-
-## 매 턴 끝 강제 갱신(Stop 훅 — `hooks/ptree-sync.py`)
-
-MCP 도구 호출(`add_problem` 등)은 터미널 렌더를 못 숨긴다. 그래서 **메인 대화에서 가시 MCP 호출을 쓰지 않고**, Claude가 응답 맨 끝에 **숨김 HTML 주석 지시**를 남기면 `hooks.json`의 **Stop command 훅**(`ptree-sync.py`)이 턴 끝에 **백그라운드로** store를 직접 갱신한다. 지시가 없으면 Stop을 **block**해서 매 턴 갱신을 강제한다(한 턴 1회, `stop_hook_active`로 무한루프 방지).
-
-지시 형식(HTML 주석이라 사용자 화면에 안 보임):
-```
-<!--PTREE {"tree":"<프로젝트 root 절대경로>","add":[{"id":"ab12","title":"16자내","parent":"<부모id|null>"}],"resolve":["id"],"rename":[{"id":"x","title":"새 제목"}]}-->
-```
-변경 없는 턴은 `<!--PTREE {"tree":"<root>"}-->`만. store 파일은 `~/.claude/plugins/store/problem-tree_*.json`에서 `node:`/`schema`를 가진 파일을 자동 선택(기기 독립). focus/current(●)는 세션 런타임 atom이라 외부서 못 바꾼다 — add/resolve/rename만 백그라운드 가능.
 
 ## 설계 메모
 
