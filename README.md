@@ -52,7 +52,15 @@ Claude Code 세션 옆에 상주하는 **문제해결 노드트리** 패널. 긴
 
 `$.store` 파일은 Claude Code가 고르는 **로드 식별자**마다 따로다: `~/.claude/skills/problem-tree`에서 자동 로드되면 `problem-tree_skills-dir-<해시>.json`, 마켓으로 설치하면 `problem-tree_<마켓>-<해시>.json`. 같은 이름의 설치본이 생기면 skills-dir 사본은 로드되지 않으므로(`claude plugin list`에 "Not loaded — name already taken"), 설치·제거만으로 store 파일이 바뀌고 옛 노드가 화면에서 사라졌다.
 
-그래서 `session.start`마다 store 디렉터리의 형제 파일(`problem-tree_*.json`)을 읽어 `node:`/`link:` 행을 자기 store로 흡수한다. 같은 id는 **행 버전**이 더 새 쪽이 이긴다 — 행 버전은 쓰기 창구(`store.ts`)가 모든 변경마다 올리는 `modAt`이다(`touchedAt`은 "작업이 닿은 시각"이라 rm·move는 안 올린다. 그래서 병합 기준으로 못 쓴다). 삭제는 묘비로, unlink도 묘비(`link:<root>`=false)로 남아 그대로 전파되고, 물리 삭제(GC)된 행은 파일별 워터마크(`adopt:<파일명>`={size,mtimeMs,ver}) 덕에 되살아나지 않는다. 지문이 같으면 다시 읽지 않는다. 못 읽은 파일(4 MiB 초과·깨진 JSON·쓰기 거부)과 같은 id의 다른 노드는 토스트로 알린다. `diag:`는 옮기지 않는다.
+그래서 `session.start`마다 store 디렉터리의 형제 파일(`problem-tree_*.json`)을 읽어 `node:`/`link:` 행을 자기 store로 흡수한다. 병합 규칙:
+- **내 쪽에 없는 행은 항상 가져온다.** 단 GC 규칙상 곧 지워질 행(30일 넘은 묘비·완료 단위 — 내가 이미 지운 것도 여기 든다)은 안 가져온다. 그래서 물리 삭제된 행이 되살아나지 않는다.
+- **양쪽에 있는 행은 합친다.** 바탕은 **행 버전**이 새 쪽 — 행 버전은 쓰기 창구(`store.ts`)가 모든 변경마다 올리는 `modAt`이다(`touchedAt`은 "작업이 닿은 시각"이라 rm·move는 안 올린다 → 병합 기준으로 못 쓴다). 상태 묶음(status·resolvedAt·removedAt…)만은 **상태가 앞선 쪽**: 삭제 > 재개 횟수 큰 쪽 > 해결 > 열림. 형제 세션이 내 해결/삭제를 모른 채 뒤늦게 focus·rename 해도 되돌아가지 않는다.
+- unlink는 묘비(`link:<root>`=false)로 남아 옛 연결이 되살아나지 않는다(연결 상태 자체는 식별자마다 따로다).
+- 미이관 레거시 `tree:`는 그 트리의 `node:` 행이 양쪽 어디에도 없을 때만 통째로 가져온다. `diag:`는 안 옮긴다.
+- 파일별 지문 `adopt:<파일명>`={size,mtimeMs,ver}가 같으면 다시 읽지 않는다(`ver`는 이미 합친 행의 get을 아끼는 용도일 뿐).
+- 못 읽은 파일(4 MiB 초과·깨진 JSON·쓰기 거부)과 같은 id의 다른 노드(따로 만들어진 것)는 덮지 않고 토스트로 알린다.
+
+알려진 한계: 흡수는 `session.start`에만 일어난다. 두 식별자가 **동시에** 살아 있는 동안(옛 세션이 아직 떠 있을 때) 한쪽의 변경은 다른 쪽의 다음 세션 시작까지 안 보인다.
 
 ## 패널 감시 Stop 훅(`hooks/ptree-watch.py`, 선택·읽기 전용)
 

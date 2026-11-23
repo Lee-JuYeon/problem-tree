@@ -90,7 +90,8 @@ test('라: session.id가 바뀌면 첫 훅에서 4테이블이 비고 옛 pointe
 })
 
 // ---------- 29 (마) ----------
-test('마: 렌더 반복·타이머에서 영속/세션 쓰기 0', OPTS, async ($, on) => {
+// 100프레임 렌더라 평소에도 4초쯤 걸린다 — 기본 5초 제한에 걸려 기기가 바쁘면 시간초과로 떨어졌다(실측). 넉넉히.
+test('마: 렌더 반복·타이머에서 영속/세션 쓰기 0', { ...OPTS, timeoutMs: 30_000 }, async ($, on) => {
   const b = boot(on)
   await start($)
   const x = await addId($, b.store, 'X')

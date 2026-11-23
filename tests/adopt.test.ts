@@ -54,22 +54,20 @@ test('A2: 같은 id는 행 버전이 더 새 쪽이 이긴다(옛 것이 새 것
   expect(nodeOf(store, 'bbbb').status).toBe('resolved')
 })
 
-test('A3: 지문(size·mtime)이 같으면 다시 읽지 않고, 바뀌면 다시 흡수한다', async ($, on) => {
+test('A3: 지문(size·mtime)이 같으면 다시 읽지 않고, 바뀌면 다시 본다 — 내 쪽에 없는 행은 항상 가져온다', async ($, on) => {
   const { store } = boot(on)
   store.files[OLD] = file({ [nk('aaaa')]: row('aaaa', 'A') })
   await start($)
   expect(store.fsReads.length).toBe(1)
-  // GC 등으로 자기 store에서 지워진 행이, 안 바뀐 옛 파일에서 부활하지 않는다.
-  store.map.delete(nk('aaaa'))
+  store.map.delete(nk('aaaa')) // (GC가 아닌 이유로) 내 쪽에서 사라짐
   await start($)
-  expect(store.fsReads.length).toBe(1)
+  expect(store.fsReads.length).toBe(1) // 파일이 그대로면 안 읽는다
   expect(nodeIds(store)).toEqual([])
-  // 옛 파일이 바뀌면(다른 프로세스가 거기에 씀) 다시 읽는다.
-  store.files[OLD] = file({ [nk('aaaa')]: row('aaaa', 'A'), [nk('dddd')]: row('dddd', 'D', { createdAt: T0 - HOUR, touchedAt: T0 - HOUR }) }, 2)
+  // 옛 파일이 바뀌면 다시 읽고, 워터마크 이하 버전이어도 내 쪽에 없는 행은 가져온다(워터마크는 get 절약용일 뿐).
+  store.files[OLD] = file({ [nk('aaaa')]: row('aaaa', 'A'), [nk('dddd')]: row('dddd', 'D') }, 2)
   await start($)
   expect(store.fsReads.length).toBe(2)
-  // 새로 생긴 행(dddd)만 온다. 내가 지운 aaaa는 지난번에 이미 본 행이라, 옛 파일이 바뀌어도 부활하지 않는다.
-  expect(nodeIds(store)).toEqual(['dddd'])
+  expect(nodeIds(store).sort()).toEqual(['aaaa', 'dddd'])
 })
 
 test('A4: 못 읽는 store(깨진 JSON·4MiB 초과)는 조용히 넘기지 않고 알린다 — 세션 시작은 계속', async ($, on) => {
@@ -292,4 +290,105 @@ test('B10: modAt 없는 옛 행의 이동은 history 시각으로 판정된다(t
   }, 1)
   await start($)
   expect(nodeOf(store, 'cccc').parent).toBeUndefined()
+})
+
+// ---------- GC 부활 방지는 워터마크가 아니라 GC 규칙 자체로 ----------
+
+test('C1: GC 규칙상 지워질 행(30일 넘은 묘비·완료 단위)은 가져오지 않는다 — 형제가 바뀔 때마다 재흡수·재삭제·토스트 없음', async ($, on) => {
+  const { store } = boot(on)
+  const old = T0 - 31 * DAY
+  const rows = {
+    [nk('dead')]: row('dead', '묘비', { status: 'removed', removedAt: old }),
+    [nk('done')]: row('done', '완료 부모', { status: 'resolved', resolvedAt: old }),
+    [nk('dkid')]: row('dkid', '완료 자식', { status: 'resolved', resolvedAt: old, parent: 'done' }),
+    [nk('half')]: row('half', '덜 끝난 부모', { status: 'resolved', resolvedAt: old }),
+    [nk('hkid')]: row('hkid', '열린 자식', { parent: 'half' }),
+    [nk('live')]: row('live', '열림'),
+  }
+  sibling(store, rows, 1)
+  await start($)
+  expect(nodeIds(store).sort()).toEqual(['half', 'hkid', 'live'])
+  for (let i = 2; i < 5; i++) {
+    const before = { sets: store.sets.length, dels: store.deletes.length, toasts: store.toasts.length }
+    sibling(store, rows, i) // 형제 파일이 (다른 이유로) 계속 바뀜
+    await start($)
+    expect(store.sets.slice(before.sets).filter(x => x.key.startsWith('node:'))).toEqual([])
+    expect(store.deletes.slice(before.dels).filter(k => k.startsWith('node:'))).toEqual([])
+    expect(store.toasts.length).toBe(before.toasts)
+  }
+})
+
+test('C2: 낡은 바탕의 뒤늦은 조작이 내 해결·삭제를 되돌리지 않는다 — 제목 같은 다른 변경은 받는다', async ($, on) => {
+  const bt = boot(on)
+  const { store } = bt
+  const rows = { [nk('aaaa')]: row('aaaa', 'A'), [nk('bbbb')]: row('bbbb', 'B') }
+  sibling(store, rows, 1)
+  await start($)
+  await bt.clock.advance(HOUR)
+  await call($, 'resolve_problem', { nodeId: 'aaaa', reason: 'r' })
+  await run($, 'rm bbbb')
+  // 내 해결/삭제를 아직 못 본 형제 세션이 그 뒤에 focus·rename 했다(더 새 버전, 상태는 옛 open).
+  sibling(store, {
+    [nk('aaaa')]: row('aaaa', 'A-새제목', { touchedAt: T0 + 2 * HOUR, startedAt: T0 + 2 * HOUR, modAt: T0 + 2 * HOUR }),
+    [nk('bbbb')]: row('bbbb', 'B', { touchedAt: T0 + 2 * HOUR, modAt: T0 + 2 * HOUR }),
+  }, 2)
+  await bt.clock.advance(2 * HOUR)
+  await start($)
+  expect(nodeOf(store, 'aaaa')).toMatchObject({ status: 'resolved', title: 'A-새제목', resolvedAt: T0 + HOUR })
+  expect(nodeOf(store, 'bbbb').status).toBe('removed')
+  expect(nodeOf(store, 'bbbb').removedAt).toBe(T0 + HOUR)
+})
+
+test('C3: 진짜 재개(reopenCount 증가)는 해결을 이긴다 — 버전이 더 낡은 쪽이어도', async ($, on) => {
+  const { store } = boot(on, {
+    [nk('aaaa')]: row('aaaa', 'A', { status: 'resolved', resolvedAt: T0 - HOUR, modAt: T0 - HOUR, reopenCount: 0 }),
+  })
+  sibling(store, { [nk('aaaa')]: row('aaaa', 'A', { reopenCount: 1, modAt: T0 - 60_000, touchedAt: T0 - 60_000 }) }, 1)
+  await start($)
+  expect(nodeOf(store, 'aaaa')).toMatchObject({ status: 'open', reopenCount: 1 })
+  expect('resolvedAt' in nodeOf(store, 'aaaa')).toBe(false)
+})
+
+test('C4: 미이관 레거시 tree:는 지문이 이미 있어도 가져오고, 이관된 뒤(그 트리의 node: 행이 있음)엔 안 가져온다', async ($, on) => {
+  const { store } = boot(on)
+  sibling(store, { [nk('aaaa')]: row('aaaa', 'A') }, 1)
+  await start($)
+  const legacy = { version: 1, seq: 1, nodes: { n1: { id: 'n1', title: '옛', status: 'open' } } }
+  sibling(store, { [nk('aaaa')]: row('aaaa', 'A'), 'tree:/elsewhere': legacy }, 2)
+  await start($)
+  expect(store.map.get('tree:/elsewhere')).toEqual(legacy)
+  // 형제가 tree:와 그 트리의 node: 행을 함께 들고 있으면(이관 중·이관 뒤 잔재) 레거시는 안 가져온다.
+  sibling(store, {
+    'tree:/third': legacy,
+    'node:/third:n1': row('n1', '옛', { status: 'removed', removedAt: T0 - HOUR }),
+  }, 3)
+  await start($)
+  expect(store.map.has('tree:/third')).toBe(false)
+  expect((store.map.get('node:/third:n1') as any).status).toBe('removed')
+})
+
+test('C5: createdAt이 없는 옛 행과 0으로 찍힌 행은 같은 노드로 본다(충돌 오탐 없음)', async ($, on) => {
+  const { store } = boot(on, { [nk('aaaa')]: row('aaaa', 'A', { createdAt: 0 }) })
+  const inc: any = row('aaaa', 'A-갱신', { modAt: T0 - 60_000 })
+  delete inc.createdAt
+  sibling(store, { [nk('aaaa')]: inc }, 1)
+  await start($)
+  expect(nodeOf(store, 'aaaa').title).toBe('A-갱신')
+  expect(store.toasts.some(t => t.includes('같은 id'))).toBe(false)
+})
+
+test('C6: 합칠 것이 없으면(같은 내용) 쓰기 0 — 두 식별자가 번갈아 떠도 핑퐁 없음', async ($, on) => {
+  const { store } = boot(on)
+  const rows = { [nk('aaaa')]: row('aaaa', 'A', { modAt: T0 - HOUR }), [nk('bbbb')]: row('bbbb', 'B') }
+  sibling(store, rows, 1)
+  await start($)
+  const before = store.sets.length
+  sibling(store, { ...rows, [nk('aaaa')]: row('aaaa', 'A', { modAt: T0 - 60_000 }) }, 2) // 버전만 오름, 내용 같음
+  await start($)
+  const wrote = store.sets.slice(before).filter(x => x.key.startsWith('node:')).map(x => x.key)
+  expect(wrote).toEqual([nk('aaaa')]) // 버전(modAt)만 맞춘다
+  const again = store.sets.length
+  sibling(store, { ...rows, [nk('aaaa')]: row('aaaa', 'A', { modAt: T0 - 60_000 }) }, 3)
+  await start($)
+  expect(store.sets.slice(again).filter(x => x.key.startsWith('node:'))).toEqual([])
 })

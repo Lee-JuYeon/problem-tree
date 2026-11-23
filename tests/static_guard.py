@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """소스 글자 그대로 보는 불변식 검사(가드 '가'의 보강).
 tests/guards.test.tsx는 테스트 런타임에 파일을 못 읽어 export된 함수의 toString만 본다 → 비export
-헬퍼 안의 주입은 못 잡는다. 이 스크립트는 파일 전체를 읽는다. 실행: python3 tests/static_guard.py"""
+헬퍼 안의 주입은 못 잡는다. 이 스크립트는 파일 전체를 읽고(StaticGuard), 호스트 자신의 스캔 결과도 본다
+(HostScan). 정규식을 피하는 철자(`const {store} = $`·`$?.store`·`$['store']`·`$.fs['write']`)는 호스트가
+모듈 로드 자체를 거부하므로(`claude plugin test`가 "did not load"로 전부 실패) 여기서 따로 막지 않는다.
+실행: python3 tests/static_guard.py"""
 import os
 import re
 import sys
@@ -61,6 +64,53 @@ class StaticGuard(unittest.TestCase):
         self.assertIn("command: 'ptree'", src)
         self.assertIn("requestId: 'problem-tree'", src)
         self.assertIn("name: 'ptree'", src)
+
+
+class HostScan(unittest.TestCase):
+    """호스트 자신의 정적 스캔(`claude plugin validate`의 calls 줄)으로 본다 — 위 정규식과 달리
+    구조분해·옵셔널 체이닝·대괄호 접근 같은 우회가 통하지 않는다(호스트가 그렇게 읽는 대로가 곧 사실)."""
+
+    # 이 플러그인이 `$`로 닿는 것 전부(권한 표면). 늘리려면 여기를 고치며 이유를 남긴다.
+    ALLOWED = {
+        "$.clock.every", "$.clock.now", "$.command.register", "$.env.get", "$.fs.list", "$.fs.read",
+        "$.session.id", "$.session.root", "$.state.get", "$.state.set",
+        "$.store.delete", "$.store.get", "$.store.keys", "$.store.set",
+        "$.tool.register", "$.ui.invalidate", "$.ui.open", "$.ui.resolve", "$.ui.toast",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        import shutil
+        import subprocess
+        exe = shutil.which("claude")
+        if not exe:
+            raise unittest.SkipTest("claude CLI 없음")
+        out = subprocess.run([exe, "plugin", "validate", ROOT], capture_output=True, text=True, timeout=120).stdout
+        cls.calls = {}
+        for ln in out.splitlines():
+            if "register.tsx calls:" not in ln:
+                continue
+            for m in re.finditer(r"(\$\.[A-Za-z.]+)(?: \(via ([^)]*)\))?", ln.split("calls:", 1)[1]):
+                cls.calls.setdefault(m.group(1), set()).update(
+                    x.strip() for x in (m.group(2) or "<register 직접>").split(","))
+        if not cls.calls:
+            raise unittest.SkipTest("validate 출력에 calls 줄 없음(형식 변경?)")
+
+    def test_capability_surface_is_pinned(self):
+        self.assertEqual(set(self.calls), self.ALLOWED)
+
+    def test_store_writes_come_only_from_store_ts_functions(self):
+        with open(os.path.join(ROOT, STORE), encoding="utf-8") as f:
+            defined = set(re.findall(r"(?:function|const)\s+([A-Za-z_]\w*)", f.read()))
+        elsewhere = set()
+        for p, src in sources():
+            if p != STORE:
+                elsewhere |= set(re.findall(r"(?:function|const)\s+([A-Za-z_]\w*)", src))
+        for call in ("$.store.set", "$.store.delete"):
+            via = self.calls[call]
+            self.assertNotIn("<register 직접>", via, call)
+            self.assertEqual(via - defined, set(), "%s: store.ts 밖 함수 경유" % call)
+            self.assertEqual(via & elsewhere, set(), "%s: 같은 이름이 store.ts 밖에도 있어 판별 불가" % call)
 
 
 if __name__ == "__main__":

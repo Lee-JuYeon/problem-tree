@@ -14,7 +14,7 @@
 
 import { atom, read, update } from 'claude-code'
 import type { PtreeNode, PtreeNodesCache, PtreeDiag } from '../../types'
-import { GC_DAYS, DAY, doneUnits } from './view'
+import { DAY, gcIds } from './view'
 
 const EMPTY_CACHE: PtreeNodesCache = { tree: '', nodes: {}, syncedAt: 0 }
 
@@ -169,16 +169,8 @@ export function insertNode(
 /** removedAt<now-30일 묘비와, doneAt<now-30일 완료단위 전체를 물리 삭제. */
 export async function gc($: Any): Promise<void> {
   const { tree, treeKey } = await treeOf($)
-  const now = await $.clock.now()
-  const cutoff = now - GC_DAYS * DAY
   const nodes = await loadNodesRaw($)
-  const del = new Set<string>()
-  for (const n of Object.values(nodes)) {
-    if (n.status === 'removed' && (n.removedAt ?? 0) < cutoff) del.add(n.id)
-  }
-  for (const u of doneUnits(nodes)) {
-    if (u.doneAt < cutoff) for (const m of u.members) del.add(m)
-  }
+  const del = gcIds(nodes, await $.clock.now())
   if (del.size === 0) return
   for (const id of del) {
     await $.store.delete(nodeKey(treeKey, id))
@@ -259,8 +251,8 @@ export async function migrate($: Any): Promise<void> {
 // skills-dir 자동로드 / 마켓 설치 / --plugin-dir)마다 따로다. 식별자는 재설치·소스 이동으로 바뀌는
 // 휘발 사실인데 노드는 영구 데이터 → 식별자가 바뀌면 옛 파일의 노드가 "안 보이는 고아"가 된다.
 // 그래서 같은 플러그인의 형제 store 파일을 읽어 node:/link: 행을 자기 store로 흡수한다(행 단위,
-// 없으면 복사·있으면 rowVersion이 더 새 쪽 — 삭제 묘비·이동·해결도 그대로 전파된다).
-// diag:/schema는 옮기지 않는다. 물리 삭제(GC)는 워터마크로, unlink는 묘비로 부활을 막는다.
+// 없으면 복사·있으면 mergeRows — 삭제 묘비·이동·해결이 그대로 전파된다).
+// diag:/schema는 옮기지 않는다. 물리 삭제(GC)된 행은 같은 GC 규칙으로 걸러, unlink는 묘비로 부활을 막는다.
 
 const STORE_FILE_RE = /^problem-tree_[A-Za-z0-9._-]+\.json$/ // 경로 구분자 불가 → 디렉터리 탈출 없음
 const ADOPT_MAX_BYTES = 4 * 1024 * 1024 // $.fs.read 상한(4 MiB)
@@ -344,48 +336,96 @@ export function adoptSiblings($: Any): Promise<AdoptResult> {
   })
 }
 
+// 상태의 앞섬 순위: 삭제는 끝(되돌림 없음). 그 밖은 재개 횟수가 큰 쪽, 같으면 해결 > 열림.
+// (재개는 reopenCount를 올리므로 "해결 뒤 다시 연 것"과 "해결을 아직 못 본 낡은 바탕"이 갈린다.)
+const statusRank = (n: PtreeNode): number =>
+  n.status === 'removed' ? Infinity : num(n.reopenCount) * 2 + (n.status === 'resolved' ? 1 : 0)
+
+/**
+ * 같은 노드의 두 사본을 합친다. 바탕은 행 버전이 새 쪽(제목·부모·메모·이력…), 상태 묶음
+ * (status·resolvedAt·resolvedBy·removedAt·reopenCount)만은 상태가 앞선 쪽 것을 쓴다 —
+ * 형제 세션이 내 해결/삭제를 모른 채(낡은 바탕) 뒤늦게 focus·rename 해도 해결/삭제가 안 되돌아간다.
+ */
+export function mergeRows(cur: PtreeNode, inc: PtreeNode): PtreeNode {
+  const base = rowVersion(inc) > rowVersion(cur) ? inc : cur
+  const st = statusRank(inc) > statusRank(cur) ? inc : cur
+  const out: PtreeNode = { ...base, status: st.status, reopenCount: st.reopenCount }
+  for (const f of ['resolvedAt', 'resolvedBy', 'removedAt'] as const) {
+    if (st[f] !== undefined) (out as any)[f] = st[f]
+    else delete out[f]
+  }
+  out.modAt = Math.max(rowVersion(cur), rowVersion(inc))
+  return out
+}
+
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
+
 /**
  * 형제 store 한 파일의 행을 흡수한다. 반환 = 흡수한 행 수와 새 워터마크.
- * 워터마크(ver) = 지난번 흡수 때 그 파일에서 본 가장 새 행 버전. 그 이하 버전의 행은 이미 한 번
- * 견준 것이므로 다시 보지 않는다 — 내 store에 없다면 내가 지운(GC) 것이지 못 본 것이 아니다.
+ * - 내 쪽에 없는 행은 **항상** 본다. 단 GC 규칙상 곧 지워질 행(gcIds — 내가 이미 지운 것도 여기 든다)은 안 가져온다.
+ * - 내 쪽에 있는 행은 mergeRows로 합친다. 워터마크(ver = 지난번에 그 파일에서 본 가장 새 행 버전)는
+ *   get 절약용일 뿐이다: 그 이하 버전이고 내 쪽에 있는 행은 지난번에 이미 합쳤으므로 건너뛴다.
  */
 async function adoptFile(
   $: Any, data: Record<string, unknown>, own: Set<string>, mark: any, now: number, out: AdoptResult,
 ): Promise<{ count: number; mark: { ver?: number } }> {
-  const first = !mark
   // 옛 지문의 touched(touchedAt 최댓값)도 워터마크로 받는다 — rowVersion ≥ touchedAt이라 안전한 하한.
   const seen: number = typeof mark?.ver === 'number' ? mark.ver : typeof mark?.touched === 'number' ? mark.touched : -Infinity
   let ver = seen
   let count = 0
+
+  // 형제의 노드 행을 트리별로 모아 GC 대상을 미리 계산한다(완료 단위는 트리 전체를 봐야 안다).
+  const byTree = new Map<string, Record<string, PtreeNode>>()
+  const rows: { k: string; v: PtreeNode; pre: string }[] = []
   for (const [k, v] of Object.entries(data)) {
-    if (k.startsWith('node:')) {
-      if (!isNodeRow(v) || !k.endsWith(`:${v.id}`)) continue
-      const rv = Math.min(rowVersion(v), now) // 미래 시각 행이 워터마크를 망가뜨리지 않게
-      if (rv > ver) ver = rv
-      if (rv <= seen) continue
-      const cur = own.has(k) ? ((await $.store.get(k)) as PtreeNode | undefined) : undefined
-      if (cur) {
-        if (cur.createdAt !== v.createdAt) {
-          out.conflicts.push(v.id) // 같은 id의 다른 노드(따로 만들어진 것) — 덮지 않고 알린다
-          continue
-        }
-        if (!(rv > rowVersion(cur))) continue
-      }
+    if (!k.startsWith('node:') || !isNodeRow(v) || !k.endsWith(`:${v.id}`)) continue
+    const pre = k.slice(0, k.length - v.id.length)
+    if (!byTree.has(pre)) byTree.set(pre, {})
+    byTree.get(pre)![v.id] = v
+    rows.push({ k, v, pre })
+  }
+  const doomed = new Map<string, Set<string>>()
+  for (const [pre, nodes] of byTree) doomed.set(pre, gcIds(nodes, now))
+
+  for (const { k, v, pre } of rows) {
+    const rv = Math.min(rowVersion(v), now) // 미래 시각 행이 워터마크를 망가뜨리지 않게
+    if (rv > ver) ver = rv
+    if (!own.has(k)) {
+      if (doomed.get(pre)!.has(v.id)) continue
       own.add(k)
       await $.store.set(k, { ...v, history: v.history.slice(-20) })
       count++
-    } else if (k.startsWith('link:')) {
+      continue
+    }
+    if (rv <= seen) continue
+    const cur = (await $.store.get(k)) as PtreeNode | undefined
+    if (!cur) continue
+    if (num(cur.createdAt) !== num(v.createdAt)) {
+      out.conflicts.push(v.id) // 같은 id의 다른 노드(따로 만들어진 것) — 덮지 않고 알린다
+      continue
+    }
+    const merged = mergeRows(cur, v)
+    merged.history = merged.history.slice(-20)
+    if (same(merged, cur)) continue
+    await $.store.set(k, merged)
+    count++
+  }
+
+  for (const [k, v] of Object.entries(data)) {
+    if (k.startsWith('link:')) {
       // 내 쪽에 키가 있으면(연결이든 unlink 묘비든) 건드리지 않는다.
       if (typeof v !== 'string' || own.has(k)) continue
       own.add(k)
       await $.store.set(k, v)
       count++
-    } else if (first && k.startsWith('tree:') && !own.has(k)) {
-      // 레거시 v1 트리(그 root를 아직 안 열어 미이관). 처음 볼 때만, 내 쪽에 그 트리의 노드 행이 하나도
-      // 없을 때만 통째로 가져온다 — 그 root에서 세션이 열리면 migrate가 node: 행으로 바꾼다.
+    } else if (k.startsWith('tree:') && !own.has(k)) {
+      // 레거시 v1 트리(그 root를 아직 안 열어 미이관). 그 트리의 node: 행이 내 쪽에도 형제 쪽에도 하나도
+      // 없을 때만(=아직 아무도 이관 안 함) 통째로 가져온다 — 그 root에서 세션이 열리면 migrate가 바꾼다.
+      // 이관된 뒤의 레거시를 가져오면 migrate가 지워진 노드를 되살린다.
       const pre = nodePrefix(treeKeyOf(k.slice('tree:'.length)))
       const legacy = v as any
-      if (!legacy || legacy.version !== 1 || !legacy.nodes || [...own].some(x => x.startsWith(pre))) continue
+      if (!legacy || legacy.version !== 1 || !legacy.nodes) continue
+      if (byTree.has(pre) || [...own].some(x => x.startsWith(pre))) continue
       own.add(k)
       await $.store.set(k, v)
       count++

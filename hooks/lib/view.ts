@@ -115,6 +115,18 @@ export function doneUnits(nodes: Nodes): DoneUnit[] {
 }
 
 /**
+ * 물리 삭제(GC) 대상 id: 삭제된 지 GC_DAYS 넘은 묘비와, 완료된 지 GC_DAYS 넘은 완료 단위 전체.
+ * store.gc가 지우는 기준이자, 형제 store 흡수가 "가져와 봐야 곧 지워질 행"을 거르는 기준(같은 규칙 하나).
+ */
+export function gcIds(nodes: Nodes, now: number): Set<string> {
+  const cutoff = now - GC_DAYS * DAY
+  const del = new Set<string>()
+  for (const n of Object.values(nodes)) if (n.status === 'removed' && (n.removedAt ?? 0) < cutoff) del.add(n.id)
+  for (const u of doneUnits(nodes)) if (u.doneAt < cutoff) for (const m of u.members) del.add(m)
+  return del
+}
+
+/**
  * 숨김 집합. removed는 항상 숨긴다. 완료 단위는 doneAt<cutoffAt일 때만 숨긴다:
  * 단위 꼭대기가 루트면 통째로, 열린 조상 밑이면 꼭대기만 ● 한 줄로 남기고 자손만 숨긴다.
  */
