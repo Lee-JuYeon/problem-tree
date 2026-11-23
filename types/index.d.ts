@@ -26,6 +26,8 @@ export type PtreeNode = {
   /** 정리는 파생이므로 삭제는 묘비(removed)로만 — 물리 제거는 30일 GC. */
   removedAt?: number
   reopenCount: number
+  /** 행 버전: 이 행이 마지막으로 바뀐 시각(store.ts의 쓰기 창구가 찍는다). 형제 store 병합 기준. */
+  modAt?: number
   note?: string
   history: PtreeHistory[]
 }

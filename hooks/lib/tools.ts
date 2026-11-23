@@ -7,7 +7,6 @@ import { add, resolve, reopen, focus, rename, move, list } from './ops'
 
 type Any = any
 
-export const TOOL_PREFIX = 'mcp__problem-tree__'
 
 export type ToolName =
   | 'add_problem' | 'resolve_problem' | 'reopen_problem' | 'rename_problem'

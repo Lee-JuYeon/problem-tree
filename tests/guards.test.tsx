@@ -31,7 +31,7 @@ test('가: $.store.set/delete·nodesAtom은 store.ts 밖에 없다(register 내�
   // ⚠ register.tsx에 비export 헬퍼를 새로 추가하면 반드시 __guardInternals 목록에도 올려라.
   //   목록 밖 헬퍼 본문엔 toString 검사가 닿지 않아 그 안의 $.store.set/delete 주입을 못 잡는다(가 가드 구멍).
   //   이 수 단언이 틀어지면(헬퍼를 추가·삭제했으면) 목록을 맞추고 이 숫자도 함께 고친다.
-  expect(Object.keys(internals).length).toBe(5)
+  expect(Object.keys(internals).length).toBe(6)
   const regInternals = Object.values(internals)
     .map((f: any) => String(f))
     .join('\n')

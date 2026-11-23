@@ -29,6 +29,7 @@ class Env:
         self.transcript = os.path.join(self.dir, "t.jsonl")
         self.node_store = os.path.join(self.store_dir, "problem-tree_skills-dir-aaa.json")
         self.write_store(self.node_store, {"schema": 2})
+        self.same_stop_ms = 0           # 테스트는 Stop을 연달아 부른다 — 중복 등록 창은 따로 시험
         self.say('<!--PTREE {"tree":"%s"}-->' % TREE)
 
     def write_store(self, path, data):
@@ -66,7 +67,8 @@ class Env:
                "hook_event_name": "Stop", "stop_hook_active": False}
         inp.update(over)
         env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PLUGIN_ROOT", "PTREE_STORE")}
-        env.update({"PTREE_STORE_DIR": self.store_dir, "PTREE_HOOK_STATE": self.state})
+        env.update({"PTREE_STORE_DIR": self.store_dir, "PTREE_HOOK_STATE": self.state,
+                    "PTREE_SAME_STOP_MS": str(self.same_stop_ms)})
         if plugin_root:
             env["CLAUDE_PLUGIN_ROOT"] = plugin_root
         p = subprocess.run([sys.executable, HOOK], input=json.dumps(inp), capture_output=True, text=True, env=env, timeout=30)
@@ -143,6 +145,14 @@ class PanelWatch(unittest.TestCase):
             f.write("{broken")
         self.e.beat("start")
         self.assertEqual(self.e.stop(), {})
+
+    def test_duplicate_registration_same_stop_is_not_remeasured(self):
+        self.e.same_stop_ms = 60000
+        self.e.beat("start")
+        self.assertEqual(self.e.stop(), {})
+        before = self.e.get_state()
+        self.assertEqual(self.e.stop(), {})        # 같은 Stop의 두 번째 인스턴스: 박동 없다고 오탐하지 않는다
+        self.assertEqual(self.e.get_state(), before)
 
     def test_state_is_pruned(self):
         os.makedirs(os.path.dirname(self.e.state), exist_ok=True)
@@ -250,6 +260,25 @@ class LegacyComment(unittest.TestCase):
         self.assertEqual(self.e.stop(transcript_path="/nonexistent/x.jsonl"), {})
         self.next_turn()
         self.assertEqual(self.e.stop(transcript_path=12345), {})
+
+    def test_quoted_comment_in_the_middle_is_not_a_directive(self):
+        d = directive(add=[{"id": "x", "title": "예시"}])
+        self.e.say("옛 형식은 이랬다: " + d + " — 지금은 안 쓴다.")
+        self.assertEqual(self.e.stop(), {})
+
+    def test_pathological_text_is_linear(self):
+        with open(self.e.transcript, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "<!--PTREE {" * 40000}]}}) + "\n")   # 440KB, 닫힘 없음
+        t0 = time.time()
+        self.assertEqual(self.e.stop(), {})
+        self.assertLess(time.time() - t0, 3.0)
+
+    def test_unwritable_state_never_bounces(self):
+        os.makedirs(self.e.state)                  # 상태 파일 자리에 디렉터리 → 저장 실패
+        self.e.say("작업함 " + directive(add=[{"id": "n1", "title": "새문제"}]))
+        self.assertNotIn("decision", self.e.stop())
+        self.assertNotIn("decision", self.e.stop())
 
     def test_garbage_stdin_exits_zero_silently(self):
         env = dict(os.environ, PTREE_STORE_DIR=self.e.store_dir, PTREE_HOOK_STATE=self.e.state)

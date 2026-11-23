@@ -5,8 +5,8 @@ import { readCache } from './lib/store'
 import { readSession } from './lib/session'
 import * as view from './lib/view'
 
-export const PANE = 'problem-tree'
-export const PANE_OPEN = { id: PANE, title: '문제트리', columns: 48 } as const
+// 패널 id 'problem-tree'는 register.tsx의 ui.render 매처(리터럴)와 같아야 한다.
+export const PANE_OPEN = { id: 'problem-tree', title: '문제트리', columns: 48 } as const
 
 export async function renderPane($: any, e: any) {
   const { Box, Text } = $.ui.resolve(e)

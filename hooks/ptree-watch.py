@@ -33,7 +33,7 @@ STATE_KEEP = 100                    # 상태 파일에 남기는 세션 수
 STORE_MAX_BYTES = 16 * 1024 * 1024  # 이보다 큰 store 파일은 읽지 않는다($.store 상한은 4 MiB)
 TAIL_BYTES = 512 * 1024             # transcript는 꼬리만 읽는다
 DIRECTIVE_MAX = 64 * 1024           # 이보다 긴 주석은 무시
-DIRECTIVE_RE = re.compile(r"<!--\s*PTREE\s*(\{.*?\})\s*-->", re.S)
+SAME_STOP_MS = int(os.environ.get("PTREE_SAME_STOP_MS") or 1500)   # 이 안에 다시 불리면 같은 Stop(훅 중복 등록)
 LEGACY_OPS = ("add", "resolve", "rename")
 
 PANEL_DEAD = ("⚠ 문제트리 패널이 이 세션에서 꺼져 있습니다(플러그인이 로드되지 않음 — 화면에 안 보일 뿐 "
@@ -60,6 +60,7 @@ def load_state():
 
 
 def save_state(st):
+    """저장에 성공하면 True. 실패해도 예외는 내지 않는다(Stop을 방해하지 않게)."""
     try:
         if len(st) > STATE_KEEP:
             def stop_at(k):
@@ -71,8 +72,9 @@ def save_state(st):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(st, f)
         os.replace(tmp, STATE)          # 원자적 교체: 중단돼도 반쯤 쓴 파일이 남지 않는다
+        return True
     except Exception:
-        pass                            # 상태 저장 실패가 Stop을 방해하지 않게
+        return False
 
 
 # ---------- 1) 패널 생존 ----------
@@ -118,8 +120,26 @@ def panel_alive(row, sid):
 
 # ---------- 2) 폐지된 주석 ----------
 
+def trailing_directive(text):
+    """글이 PTREE 주석으로 '끝날' 때만 그 JSON 본문을 돌려준다(옛 규약: 응답 맨 끝 1줄).
+    글 중간의 주석은 인용·예시일 수 있어 보지 않는다. 정규식 없이 선형 탐색(거대·악성 입력에 2차 시간 금지)."""
+    t = text.rstrip()
+    if not t.endswith("-->"):
+        return None
+    start = t.rfind("<!--")
+    if start < 0:
+        return None
+    inner = t[start + 4:-3].strip()
+    if not inner.startswith("PTREE"):
+        return None
+    body = inner[5:].strip()
+    if not body.startswith("{") or len(body) > DIRECTIVE_MAX:
+        return None
+    return body
+
+
 def last_legacy_directive(transcript_path):
-    """transcript 꼬리의 assistant 글에서 '변경이 담긴' 마지막 PTREE 주석의 지문. 없으면 None."""
+    """transcript 꼬리의 assistant 글 중, 변경이 담긴 PTREE 주석으로 끝나는 마지막 글의 지문. 없으면 None."""
     try:
         size = os.path.getsize(transcript_path)
         with open(transcript_path, "rb") as f:
@@ -144,15 +164,15 @@ def last_legacy_directive(transcript_path):
         for b in content:
             if not (isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)):
                 continue
-            for body in DIRECTIVE_RE.findall(b["text"]):
-                if len(body) > DIRECTIVE_MAX:
-                    continue
-                try:
-                    obj = json.loads(body)
-                except Exception:
-                    continue
-                if isinstance(obj, dict) and any(isinstance(obj.get(k), list) and obj.get(k) for k in LEGACY_OPS):
-                    found = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+            body = trailing_directive(b["text"])
+            if body is None:
+                continue
+            try:
+                obj = json.loads(body)
+            except Exception:
+                continue
+            if isinstance(obj, dict) and any(isinstance(obj.get(k), list) and obj.get(k) for k in LEGACY_OPS):
+                found = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
     return found
 
 
@@ -168,6 +188,9 @@ def decide(inp):
     st = load_state()
     row = st.get(sid) if isinstance(st.get(sid), dict) else {}
     now = now_ms()
+    prev = row.get("stopAt")
+    if isinstance(prev, (int, float)) and 0 <= now - prev < SAME_STOP_MS:
+        return {}                       # 같은 Stop에 두 번 불림(중복 등록) → 방금 판정이 유효, 다시 재면 오탐
     out = {}
 
     alive = panel_alive(row, sid)
@@ -189,7 +212,9 @@ def decide(inp):
 
     row["stopAt"] = now
     st[sid] = row
-    save_state(st)
+    if not save_state(st):
+        out.pop("decision", None)       # "한 번만"을 기억 못 하면 매 턴 되돌려 보내게 된다 → 안 막는다
+        out.pop("reason", None)
     return out
 
 

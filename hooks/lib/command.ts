@@ -6,7 +6,6 @@ import { TITLE_MAX } from './view'
 
 type Any = any
 
-export const COMMAND = 'ptree'
 export const ARGUMENT_HINT =
   '[add <제목> | resolve <id> | reopen <id> | focus <id> | rename <id> <제목> | rm <id> | move <id> [부모id] | note <id> <글> | link <경로> | unlink | list]'
 const OPENED = '문제트리 패널을 열었습니다.'

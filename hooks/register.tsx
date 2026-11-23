@@ -9,9 +9,9 @@ import {
   ensureSession, tasksReplace, ensureCutoff, turnStart, turnEnd, taskDrop,
   readSession, bindAgent, taskProvisional,
 } from './lib/session'
-import { TOOLS, TOOL_PREFIX, runTool } from './lib/tools'
-import { COMMAND, ARGUMENT_HINT, runCommand } from './lib/command'
-import { PANE, PANE_OPEN, renderPane } from './pane'
+import { TOOLS, runTool, type ToolName } from './lib/tools'
+import { ARGUMENT_HINT, runCommand } from './lib/command'
+import { PANE_OPEN, renderPane } from './pane'
 import * as view from './lib/view'
 
 const STALE_TICK_MS = 3_600_000 // "paused Nd" 일수 갱신용 다시 그리기 주기
@@ -64,13 +64,24 @@ async function adoptOrphans($: any) {
     if (r.adopted > 0) $.ui.toast(`문제트리: 다른 설치의 store에서 ${r.adopted}행을 가져왔습니다 (${r.files.join(', ')})`)
     if (r.skipped.length > 0)
       $.ui.toast(`문제트리: 읽지 못한 옛 store가 있습니다(노드가 안 보일 수 있음): ${r.skipped.join(', ')}`)
+    if (r.conflicts.length > 0)
+      $.ui.toast(`문제트리: 다른 설치의 store에 같은 id의 다른 노드가 있어 가져오지 않았습니다: ${r.conflicts.join(', ')}`)
   } catch {
-    /* fs 접근 불가(권한·환경) — 자기 store만으로 계속 */
+    $.ui.toast('문제트리: 다른 설치의 store를 확인하지 못했습니다(노드가 안 보일 수 있음)')
   }
 }
 
+// 도구 호출 1건: 세션 가드 → 실행 → 타이머 정리 → 결과 문구.
+async function callTool($: any, name: ToolName, input: unknown) {
+  await ensureSession($)
+  const out = await runTool($, name, input)
+  await afterWrite($)
+  return { result: out }
+}
+
 async function registerSurface($: any) {
-  await $.command.register({ name: COMMAND, description: '문제해결 노드트리 패널', argumentHint: ARGUMENT_HINT })
+  // name은 리터럴로(호스트 정적 스캔이 아래 command.run 훅과 짝짓는다: "answers its own command").
+  await $.command.register({ name: 'ptree', description: '문제해결 노드트리 패널', argumentHint: ARGUMENT_HINT })
   for (const t of TOOLS)
     await $.tool.register({ name: t.name, description: t.description, isDeferred: false, inputSchema: t.inputSchema })
 }
@@ -202,7 +213,9 @@ export const register: Register = on => {
   })
 
   // ---------- slash command ----------
-  on('command.run', { command: COMMAND }, async ($, e) => {
+  // ★매처(command·tool·requestId)는 반드시 이 파일에 문자열 리터럴로 쓴다. 호스트가 훅을 정적으로
+  //   읽어 색인하므로(`claude plugin validate`의 hooks 줄), 상수·루프로 돌리면 `tool=?`가 되어 못 읽는다.
+  on('command.run', { command: 'ptree' }, async ($, e) => {
     await ensureSession($)
     void $.ui.open(PANE_OPEN)
     const out = await runCommand($, e.args ?? '')
@@ -210,20 +223,20 @@ export const register: Register = on => {
     return { text: out }
   })
 
-  // ---------- registered ptree tools ----------
-  for (const t of TOOLS)
-    on('tool.call', { tool: TOOL_PREFIX + t.name } as any, async ($: any, e: any) => {
-      await ensureSession($)
-      const out = await runTool($, t.name, e)
-      await afterWrite($)
-      return { result: out }
-    })
+  // ---------- registered ptree tools (선언·실행은 lib/tools.ts, 여기는 이름별 배선) ----------
+  on('tool.call', { tool: 'mcp__problem-tree__add_problem' }, ($, e) => callTool($, 'add_problem', e))
+  on('tool.call', { tool: 'mcp__problem-tree__resolve_problem' }, ($, e) => callTool($, 'resolve_problem', e))
+  on('tool.call', { tool: 'mcp__problem-tree__reopen_problem' }, ($, e) => callTool($, 'reopen_problem', e))
+  on('tool.call', { tool: 'mcp__problem-tree__focus_problem' }, ($, e) => callTool($, 'focus_problem', e))
+  on('tool.call', { tool: 'mcp__problem-tree__rename_problem' }, ($, e) => callTool($, 'rename_problem', e))
+  on('tool.call', { tool: 'mcp__problem-tree__move_problem' }, ($, e) => callTool($, 'move_problem', e))
+  on('tool.call', { tool: 'mcp__problem-tree__list_problems' }, ($, e) => callTool($, 'list_problems', e))
 
   // ---------- pane ----------
-  on('ui.render', { component: 'Pane', requestId: PANE }, renderPane)
+  on('ui.render', { component: 'Pane', requestId: 'problem-tree' }, ($, e) => renderPane($, e))
 }
 
 // 가드 26(가) 정적검사용(비런타임): register.tsx의 비export 헬퍼 소스를 테스트가 들여다볼 수 있게 노출한다.
 // 실기기 fs가 테스트 런타임에 없어 파일 전체 텍스트를 못 읽으므로, 이 집합의 toString으로
 // register 내부 헬퍼(bgTask 등)에 `$.store.set` 주입이 없음을 검사한다. 런타임 동작엔 영향 없음.
-export const __guardInternals = { bgTask, afterWrite, ensureTimer, registerSurface, adoptOrphans }
+export const __guardInternals = { bgTask, afterWrite, ensureTimer, registerSurface, adoptOrphans, callTool }

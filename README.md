@@ -52,7 +52,7 @@ Claude Code 세션 옆에 상주하는 **문제해결 노드트리** 패널. 긴
 
 `$.store` 파일은 Claude Code가 고르는 **로드 식별자**마다 따로다: `~/.claude/skills/problem-tree`에서 자동 로드되면 `problem-tree_skills-dir-<해시>.json`, 마켓으로 설치하면 `problem-tree_<마켓>-<해시>.json`. 같은 이름의 설치본이 생기면 skills-dir 사본은 로드되지 않으므로(`claude plugin list`에 "Not loaded — name already taken"), 설치·제거만으로 store 파일이 바뀌고 옛 노드가 화면에서 사라졌다.
 
-그래서 `session.start`마다 store 디렉터리의 형제 파일(`problem-tree_*.json`)을 읽어 `node:`/`link:` 행을 자기 store로 흡수한다. 같은 id는 `touchedAt`이 더 새 쪽, 파일별 지문(`adopt:<파일명>`=size·mtime)이 같으면 다시 읽지 않는다. 못 읽은 파일(4 MiB 초과·깨진 JSON)은 토스트로 알린다. `diag:`·레거시 `tree:`는 옮기지 않는다.
+그래서 `session.start`마다 store 디렉터리의 형제 파일(`problem-tree_*.json`)을 읽어 `node:`/`link:` 행을 자기 store로 흡수한다. 같은 id는 **행 버전**이 더 새 쪽이 이긴다 — 행 버전은 쓰기 창구(`store.ts`)가 모든 변경마다 올리는 `modAt`이다(`touchedAt`은 "작업이 닿은 시각"이라 rm·move는 안 올린다. 그래서 병합 기준으로 못 쓴다). 삭제는 묘비로, unlink도 묘비(`link:<root>`=false)로 남아 그대로 전파되고, 물리 삭제(GC)된 행은 파일별 워터마크(`adopt:<파일명>`={size,mtimeMs,ver}) 덕에 되살아나지 않는다. 지문이 같으면 다시 읽지 않는다. 못 읽은 파일(4 MiB 초과·깨진 JSON·쓰기 거부)과 같은 id의 다른 노드는 토스트로 알린다. `diag:`는 옮기지 않는다.
 
 ## 패널 감시 Stop 훅(`hooks/ptree-watch.py`, 선택·읽기 전용)
 
@@ -64,7 +64,7 @@ Claude Code 세션 옆에 상주하는 **문제해결 노드트리** 패널. 긴
 ```
 
 - **패널 생존:** 플러그인은 살아 있는 동안 매 턴 시작에 `diag:<세션id>`에 한 줄을 쓴다(박동). 직전 Stop 이후 박동이 없으면 그 턴에 바로 `systemMessage`로 경고한다(같은 세션 10분에 한 번, Stop은 막지 않음).
-- **폐지된 숨김 주석:** 변경(add/resolve/rename)이 담긴 `<!--PTREE …-->` 주석이 아직 들어오면 "반영 안 됐다, MCP 도구로 직접 반영하라"고 한 번 되돌려 보낸다(같은 주석은 1회, 빈 주석·주석 없음은 무시).
+- **폐지된 숨김 주석:** 응답이 변경(add/resolve/rename)이 담긴 `<!--PTREE …-->` 주석으로 **끝나면**(중간 인용은 무시) "반영 안 됐다, MCP 도구로 직접 반영하라"고 한 번 되돌려 보낸다(같은 주석은 1회, 빈 주석·주석 없음은 무시).
 - 플러그인 store에는 **절대 쓰지 않는다.** 쓰는 파일은 자기 상태 파일 `~/.claude/plugins/data/problem-tree-hook/state.json` 하나(원자적 교체).
 
 ### 왜 숨김 주석 + 백그라운드 훅 동기화를 없앴나
@@ -76,7 +76,7 @@ Claude Code 세션 옆에 상주하는 **문제해결 노드트리** 패널. 긴
 
 지금은 **턴 안에서 MCP 도구를 직접 부른다**(`add_problem`·`resolve_problem`·…). 즉시·가시·단일 쓰기 경로(`store.ts`)다.
 
-테스트: `claude plugin test .`(모듈) · `python3 tests/hook_test.py`(Stop 훅).
+테스트: `claude plugin test .`(모듈) · `python3 tests/hook_test.py`(Stop 훅) · `python3 tests/static_guard.py`(소스 불변식).
 
 ## 진단 로그(불 꺼짐 추적용, 동작 무관)
 
@@ -97,10 +97,10 @@ hooks/lib/view.ts      순수 계산($ 없음: 숨김·레이아웃·불·목록
 hooks/ptree-watch.py   패널 감시 Stop 훅(선택, settings.json에 등록, 읽기 전용)
 ```
 
-의존은 한 방향: register → tools/command/pane → ops → store/session → view. 불변식은 `tests/guards.test.tsx`가 지킨다(store 쓰기는 store.ts에만, 렌더·타이머 쓰기 0, 이벤트별 쓰기 테이블, Stop 핸들러는 절대 안 막음).
+의존은 한 방향: register → tools/command/pane → ops → store/session → view. 불변식은 `tests/guards.test.tsx`(행동: 렌더·타이머 쓰기 0, 이벤트별 쓰기 테이블, Stop 핸들러는 절대 안 막음)와 `tests/static_guard.py`(소스: store 쓰기는 store.ts에만, 세션 atom은 session.ts에만, 파일 쓰기·프로세스·네트워크 0, 훅 매처는 register.tsx에 리터럴)가 지킨다.
 
 ## 설계 메모
 
 - 도구의 입력 타입은 `types/index.d.ts`의 `McpToolInputs`에 **직접 선언**한다(생성 `claude-code-mcp` 스냅샷은 한 리로드 뒤처지므로 거기 기대지 않음). `hooks/lib/tools.ts`의 `TOOLS`와 짝이다.
-- 플랫폼 규칙: `$`는 정적으로 보이는 호출에만 넘길 수 있다(표에 담은 클로저로는 못 넘김) → 도구 실행은 이름으로 가르는 `runTool` switch.
+- 플랫폼 규칙 둘: ①`$`는 정적으로 보이는 호출에만 넘길 수 있다(표에 담은 클로저로는 못 넘김) → 도구 실행은 이름으로 가르는 `runTool` switch. ②호스트가 훅 매처를 정적으로 읽는다 → `command`/`tool`/`requestId`와 커맨드 `name`은 `register.tsx`에 문자열 리터럴로(상수·루프면 `claude plugin validate`에 `tool=?`로 나온다).
 - 같은 이름의 플러그인은 한 벌만 로드된다. `~/.claude/skills/problem-tree`(자동 로드, `@skills-dir`)와 마켓 설치본(`@<마켓>`)이 둘 다 있으면 설치본이 이기고 store 파일도 달라진다 — 위 "고아 store 흡수"가 노드를 이어 준다.

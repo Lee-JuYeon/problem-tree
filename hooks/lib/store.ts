@@ -3,11 +3,11 @@
 // 읽기 캐시(nodesAtom)는 패널 렌더 전용 복제본이며, 권위는 언제나 store다.
 //
 // store 키(전부 이 파일이 소유):
-//   node:<treeKey>:<id>  노드 1행(PtreeNode) — 영구 데이터의 전부
-//   link:<root>          이 root가 다른 tree를 보게 하는 연결(문자열)
+//   node:<treeKey>:<id>  노드 1행(PtreeNode) — 영구 데이터의 전부. modAt = 행 버전(쓰기마다 증가)
+//   link:<root>          이 root가 다른 tree를 보게 하는 연결(문자열). false = unlink 묘비
 //   schema               노드행 스키마 버전(2)
 //   store:id             이 store 파일의 표식(형제 파일 중 자기 파일 식별)
-//   adopt:<파일명>        형제 store 파일을 마지막으로 흡수한 지문 {size,mtimeMs,touched}
+//   adopt:<파일명>        형제 store 파일을 마지막으로 흡수한 지문 {size,mtimeMs,ver}
 //   diag:<세션id>         진단 로그 최근 50건 — 턴 시작 항목은 ptree-watch.py가 박동으로 읽는다
 //   tree:<root>          레거시 v1(통째 트리). migrate가 node: 행으로 바꾸고 지운다
 // 휘발 사실(도는 중·포인터·백그라운드 작업)은 여기 없다 — session.ts의 세션 atom에만 있다.
@@ -127,6 +127,7 @@ export function patchNode($: Any, id: string, fn: (n: PtreeNode, at: number) => 
     const rej = fn(draft, at)
     if (typeof rej === 'string') return { error: rej }
     if (draft.history.length > 20) draft.history = draft.history.slice(-20)
+    draft.modAt = Math.max(at, rowVersion(cur) + 1) // 모든 변경이 행 버전을 올린다(형제 store 병합 기준)
     await $.store.set(key, draft)
     patchSeq++
     await update($, nodesAtom, (c: PtreeNodesCache) => ({ ...c, tree, nodes: { ...c.nodes, [id]: draft } }))
@@ -155,10 +156,11 @@ export function insertNode(
       const err = validate(nodes)
       if (err) return { error: err }
     }
-    await $.store.set(key, node)
+    const row: PtreeNode = { ...node, modAt: await $.clock.now() }
+    await $.store.set(key, row)
     patchSeq++
-    await update($, nodesAtom, (c: PtreeNodesCache) => ({ ...c, tree, nodes: { ...c.nodes, [node.id]: node } }))
-    return { node }
+    await update($, nodesAtom, (c: PtreeNodesCache) => ({ ...c, tree, nodes: { ...c.nodes, [row.id]: row } }))
+    return { node: row }
   })
 }
 
@@ -195,9 +197,10 @@ export async function setLink($: Any, tree: string): Promise<void> {
   const root = await $.session.root()
   await $.store.set(`link:${root}`, tree)
 }
+/** 연결 해제. 키를 지우지 않고 묘비(false)를 남긴다 — 지우면 형제 store 흡수가 옛 연결을 되살린다. */
 export async function clearLink($: Any): Promise<void> {
   const root = await $.session.root()
-  await $.store.delete(`link:${root}`)
+  if (typeof (await $.store.get(`link:${root}`)) === 'string') await $.store.set(`link:${root}`, false)
 }
 
 // ---------- migrate (session.start마다, 스캔 없음, 최대 1키 변환) ----------
@@ -256,14 +259,15 @@ export async function migrate($: Any): Promise<void> {
 // skills-dir 자동로드 / 마켓 설치 / --plugin-dir)마다 따로다. 식별자는 재설치·소스 이동으로 바뀌는
 // 휘발 사실인데 노드는 영구 데이터 → 식별자가 바뀌면 옛 파일의 노드가 "안 보이는 고아"가 된다.
 // 그래서 같은 플러그인의 형제 store 파일을 읽어 node:/link: 행을 자기 store로 흡수한다(행 단위,
-// 없으면 복사·있으면 touchedAt이 더 새 쪽). diag:/schema/레거시 tree:는 옮기지 않는다.
+// 없으면 복사·있으면 rowVersion이 더 새 쪽 — 삭제 묘비·이동·해결도 그대로 전파된다).
+// diag:/schema는 옮기지 않는다. 물리 삭제(GC)는 워터마크로, unlink는 묘비로 부활을 막는다.
 
 const STORE_FILE_RE = /^problem-tree_[A-Za-z0-9._-]+\.json$/ // 경로 구분자 불가 → 디렉터리 탈출 없음
 const ADOPT_MAX_BYTES = 4 * 1024 * 1024 // $.fs.read 상한(4 MiB)
 const adoptKey = (name: string) => `adopt:${name}`
 const STORE_ID_KEY = 'store:id' // 이 store 파일의 표식(형제 목록에서 자기 파일을 알아보는 용도)
 
-export type AdoptResult = { adopted: number; files: string[]; skipped: string[] }
+export type AdoptResult = { adopted: number; files: string[]; skipped: string[]; conflicts: string[] }
 
 /** store 디렉터리(절대경로). CLAUDE_CONFIG_DIR 우선, 없으면 $HOME/.claude. 못 구하면 undefined. */
 async function storeDir($: Any): Promise<string | undefined> {
@@ -273,75 +277,121 @@ async function storeDir($: Any): Promise<string | undefined> {
   return home ? `${home}/.claude/plugins/store` : undefined
 }
 
+const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+
+/**
+ * 행의 버전 = 그 행이 마지막으로 바뀐 시각. patchNode/insertNode(유일한 쓰기 창구)가 `modAt`에 찍는다.
+ * ★`touchedAt`은 버전이 아니다 — "작업이 닿은 시각"이라 rm·move·자식 승격은 올리지 않는다.
+ * modAt을 안 찍는 옛 행·옛 쓰기 주체도 있으므로, 행 안의 모든 시각 중 최댓값으로 본다.
+ */
+export function rowVersion(n: PtreeNode): number {
+  let v = Math.max(num(n.modAt), num(n.createdAt), num(n.touchedAt), num(n.resolvedAt), num(n.removedAt))
+  if (Array.isArray(n.history)) for (const h of n.history) v = Math.max(v, num(h?.at))
+  return v
+}
+
 const isNodeRow = (v: any): v is PtreeNode =>
   !!v && typeof v === 'object' && typeof v.id === 'string' && typeof v.title === 'string' &&
   (v.status === 'open' || v.status === 'resolved' || v.status === 'removed') && Array.isArray(v.history)
 
 /**
  * 형제 store 파일들의 node:/link: 행을 자기 store로 흡수한다.
- * - 파일별 `adopt:<파일명>`={size,mtimeMs} 지문이 같으면 다시 읽지 않는다(GC된 행 부활·재읽기 방지).
+ * - 파일별 `adopt:<파일명>`={size,mtimeMs,ver} 지문이 같으면 다시 읽지 않는다.
  * - 자기 파일도 목록에 섞여 있다(자기 파일명은 알 길이 없다). `store:id` 표식이 같으면 자기 파일 → 건너뛴다.
- * - 못 읽은 파일(4 MiB 초과·깨진 JSON)은 skipped로 돌려 호출부가 사용자에게 알린다(조용한 고아 금지).
+ * - 못 읽은 파일(4 MiB 초과·깨진 JSON·쓰기 거부)은 skipped, 같은 id의 다른 노드는 conflicts로 돌려
+ *   호출부가 사용자에게 알린다(조용한 고아·조용한 덮어쓰기 금지).
  */
 export function adoptSiblings($: Any): Promise<AdoptResult> {
   return enqueue(async () => {
-    const out: AdoptResult = { adopted: 0, files: [], skipped: [] }
+    const out: AdoptResult = { adopted: 0, files: [], skipped: [], conflicts: [] }
     const dir = await storeDir($)
     if (!dir) return out
-    const entries: any[] = await $.fs.list(dir)
+    let entries: any[]
+    try {
+      entries = await $.fs.list(dir)
+    } catch {
+      return out // fs 접근 불가(권한·환경) — 볼 수 있는 형제가 없다
+    }
     const own = new Set<string>(await $.store.keys())
     let selfId = await $.store.get(STORE_ID_KEY)
     if (typeof selfId !== 'string') {
       selfId = `${(await $.clock.now()).toString(36)}-${Math.random().toString(36).slice(2, 10)}`
       await $.store.set(STORE_ID_KEY, selfId)
     }
+    const now: number = await $.clock.now()
     for (const e of entries) {
       if (!e || e.kind !== 'file' || e.isLink || !STORE_FILE_RE.test(String(e.name))) continue
       const mark = (await $.store.get(adoptKey(e.name))) as any
       if (mark && mark.size === e.size && mark.mtimeMs === e.mtimeMs) continue
-      // 지난번 흡수 때 본 가장 새 touchedAt. 그 뒤로 안 바뀐 행은 다시 견주지 않는다(get 절약).
-      const seen: number = mark && typeof mark.touched === 'number' ? mark.touched : -Infinity
-      let touched = seen
-      let data: any
       try {
         if (e.size > ADOPT_MAX_BYTES) throw new Error('too large')
-        data = JSON.parse(await $.fs.read(`${dir}/${e.name}`))
+        const data = JSON.parse(await $.fs.read(`${dir}/${e.name}`))
         if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('not an object')
-      } catch {
-        out.skipped.push(e.name)
-        continue
-      }
-      if (data[STORE_ID_KEY] === selfId) continue // 자기 파일
-      let n = 0
-      for (const [k, v] of Object.entries(data)) {
-        if (k.startsWith('node:')) {
-          if (!isNodeRow(v) || !k.endsWith(`:${v.id}`)) continue
-          const t = typeof v.touchedAt === 'number' ? v.touchedAt : 0
-          if (t > touched) touched = t
-          if (t <= seen && own.has(k)) continue
-          const cur = own.has(k) ? ((await $.store.get(k)) as PtreeNode | undefined) : undefined
-          if (cur && !(t > (cur.touchedAt ?? 0))) continue
-          own.add(k)
-          await $.store.set(k, { ...v, history: v.history.slice(-20) })
-          n++
-        } else if (k.startsWith('link:')) {
-          if (typeof v !== 'string' || own.has(k)) continue
-          own.add(k)
-          await $.store.set(k, v)
-          n++
+        if (data[STORE_ID_KEY] === selfId) continue // 자기 파일
+        const n = await adoptFile($, data, own, mark, now, out)
+        // 지문은 파일 하나를 끝까지 흡수한 뒤에만 남긴다(중간 실패 = 다음 시작에 처음부터 다시).
+        await $.store.set(adoptKey(e.name), { size: e.size, mtimeMs: e.mtimeMs, ...n.mark })
+        if (n.count > 0) {
+          out.adopted += n.count
+          out.files.push(e.name)
+          patchSeq++
         }
-      }
-      await $.store.set(adoptKey(e.name), {
-        size: e.size, mtimeMs: e.mtimeMs, ...(touched > -Infinity ? { touched } : {}),
-      })
-      if (n > 0) {
-        out.adopted += n
-        out.files.push(e.name)
-        patchSeq++
+      } catch {
+        out.skipped.push(e.name) // 못 읽음·깨짐·쓰기 거부(4 MiB) — 호출부가 사용자에게 알린다
       }
     }
     return out
   })
+}
+
+/**
+ * 형제 store 한 파일의 행을 흡수한다. 반환 = 흡수한 행 수와 새 워터마크.
+ * 워터마크(ver) = 지난번 흡수 때 그 파일에서 본 가장 새 행 버전. 그 이하 버전의 행은 이미 한 번
+ * 견준 것이므로 다시 보지 않는다 — 내 store에 없다면 내가 지운(GC) 것이지 못 본 것이 아니다.
+ */
+async function adoptFile(
+  $: Any, data: Record<string, unknown>, own: Set<string>, mark: any, now: number, out: AdoptResult,
+): Promise<{ count: number; mark: { ver?: number } }> {
+  const first = !mark
+  // 옛 지문의 touched(touchedAt 최댓값)도 워터마크로 받는다 — rowVersion ≥ touchedAt이라 안전한 하한.
+  const seen: number = typeof mark?.ver === 'number' ? mark.ver : typeof mark?.touched === 'number' ? mark.touched : -Infinity
+  let ver = seen
+  let count = 0
+  for (const [k, v] of Object.entries(data)) {
+    if (k.startsWith('node:')) {
+      if (!isNodeRow(v) || !k.endsWith(`:${v.id}`)) continue
+      const rv = Math.min(rowVersion(v), now) // 미래 시각 행이 워터마크를 망가뜨리지 않게
+      if (rv > ver) ver = rv
+      if (rv <= seen) continue
+      const cur = own.has(k) ? ((await $.store.get(k)) as PtreeNode | undefined) : undefined
+      if (cur) {
+        if (cur.createdAt !== v.createdAt) {
+          out.conflicts.push(v.id) // 같은 id의 다른 노드(따로 만들어진 것) — 덮지 않고 알린다
+          continue
+        }
+        if (!(rv > rowVersion(cur))) continue
+      }
+      own.add(k)
+      await $.store.set(k, { ...v, history: v.history.slice(-20) })
+      count++
+    } else if (k.startsWith('link:')) {
+      // 내 쪽에 키가 있으면(연결이든 unlink 묘비든) 건드리지 않는다.
+      if (typeof v !== 'string' || own.has(k)) continue
+      own.add(k)
+      await $.store.set(k, v)
+      count++
+    } else if (first && k.startsWith('tree:') && !own.has(k)) {
+      // 레거시 v1 트리(그 root를 아직 안 열어 미이관). 처음 볼 때만, 내 쪽에 그 트리의 노드 행이 하나도
+      // 없을 때만 통째로 가져온다 — 그 root에서 세션이 열리면 migrate가 node: 행으로 바꾼다.
+      const pre = nodePrefix(treeKeyOf(k.slice('tree:'.length)))
+      const legacy = v as any
+      if (!legacy || legacy.version !== 1 || !legacy.nodes || [...own].some(x => x.startsWith(pre))) continue
+      own.add(k)
+      await $.store.set(k, v)
+      count++
+    }
+  }
+  return { count, mark: ver > -Infinity ? { ver } : {} }
 }
 
 // ---------- 진단 로그(diag:<sid>, 세션별 최근 50건) ----------
@@ -357,8 +407,9 @@ const DIAG_KEEP = 100
 const DIAG_GC_BATCH = 100
 // 상한 안쪽이어도 TTL 만료를 확인해 볼 "가장 오래된" 키 수.
 const DIAG_TTL_PROBE = 20
-// 상한을 넘어도 지우지 않는 "아직 도는 세션" 기준(마지막 항목이 이 안쪽). Stop 훅이 박동으로 읽는다.
-const DIAG_ACTIVE_MS = 3_600_000
+// 상한을 넘어도 지우지 않는 "아직 도는 세션" 기준(마지막 항목이 이 안쪽). ptree-watch.py가 박동으로
+// 읽으므로, 도는 세션의 키를 지우면 "패널 꺼짐" 오탐이 난다 → 넉넉히 하루.
+const DIAG_ACTIVE_MS = DAY
 const diagKey = (sid: string) => `diag:${sid}`
 
 /** 항목 1건을 diag:<sid> 끝에 붙이고 최근 50건만 남긴다(직렬 큐 경유, 실패는 삼킴). */
@@ -386,7 +437,7 @@ export function diagPush($: Any, sid: string, entry: PtreeDiag): Promise<void> {
  * 다른 세션의 diag: 키를 정리한다. `$.store.keys()`는 삽입순(=세션이 처음 기록한 순)이라
  * 앞쪽이 가장 오래된 세션이다. 앞에서부터 최대 DIAG_GC_BATCH개만 읽어 본다(전수 get 금지):
  * - 형식이 이상하거나 마지막 항목이 7일보다 오래됨 → 삭제
- * - 세션 수가 DIAG_KEEP을 넘는 만큼의 앞쪽 키 → 삭제(단, 최근 1시간 안에 기록한 세션은 남김)
+ * - 세션 수가 DIAG_KEEP을 넘는 만큼의 앞쪽 키 → 삭제(단, 최근 하루 안에 기록한 세션은 남김)
  * 남은 초과분은 다음 session.start들이 이어서 지운다.
  */
 export async function diagGc($: Any, ownSid: string): Promise<void> {

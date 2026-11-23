@@ -168,7 +168,7 @@ test('D8: diagGc — 8일 전 diag:old 삭제, 1일 전 유지, 자기 키 유�
 // ---------- D9 ----------
 test('D9: diagGc 세션 수 상한 — 최근 100개만 남기고 오래된 것부터 지운다(자기 키 유지)', async ($, on) => {
   const entries: Record<string, unknown> = {}
-  for (let i = 0; i < 130; i++) entries[`diag:x${i}`] = [{ at: T0 - DAY + i, ev: 'start' }] // 전부 TTL 안쪽
+  for (let i = 0; i < 130; i++) entries[`diag:x${i}`] = [{ at: T0 - 2 * DAY + i, ev: 'start' }] // 전부 TTL 안쪽·하루 넘음
   const { store } = boot(on, entries)
   await start($)
   const left = [...store.map.keys()].filter(k => k.startsWith('diag:x'))
@@ -196,9 +196,9 @@ test('D10: diagGc는 한 번에 100개까지만 들여다본다(전수 get 금�
 })
 
 // ---------- D11 ----------
-test('D11: 상한을 넘어도 최근 1시간 안에 기록한(아직 도는) 세션의 diag는 지우지 않는다', async ($, on) => {
-  const entries: Record<string, unknown> = { 'diag:live': [{ at: T0 - 60_000, ev: 'start' }] } // 가장 먼저 만들어졌지만 방금도 기록
-  for (let i = 0; i < 120; i++) entries[`diag:z${i}`] = [{ at: T0 - DAY + i, ev: 'start' }]
+test('D11: 상한을 넘어도 최근 하루 안에 기록한(아직 도는) 세션의 diag는 지우지 않는다', async ($, on) => {
+  const entries: Record<string, unknown> = { 'diag:live': [{ at: T0 - 20 * 3_600_000, ev: 'start' }] } // 가장 먼저 만들어졌지만 20시간 전에도 기록
+  for (let i = 0; i < 120; i++) entries[`diag:z${i}`] = [{ at: T0 - 2 * DAY + i, ev: 'start' }]
   const { store } = boot(on, entries)
   await start($)
   expect(store.map.has('diag:live')).toBe(true)
