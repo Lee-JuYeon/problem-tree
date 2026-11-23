@@ -7,7 +7,8 @@
 //   link:<root>          이 root가 다른 tree를 보게 하는 연결(문자열). false = unlink 묘비
 //   schema               노드행 스키마 버전(2)
 //   store:id             이 store 파일의 표식(형제 파일 중 자기 파일 식별)
-//   gone:<treeKey>       GC로 물리 삭제한 노드 {id: 시각} — 형제 store의 낡은 사본이 되살리지 못하게(1년 보관)
+//   gone:<treeKey>       GC로 물리 삭제한 노드 {id: 시각} — 형제 store의 낡은 사본이 되살리지 못하게(1년 보관).
+//                        형제끼리 id별 최댓값으로 합쳐진다(행과 마찬가지로 복제 상태의 일부)
 //   adopt:<파일명>        형제 store 파일을 마지막으로 흡수한 지문 {size,mtimeMs,ver}
 //   diag:<세션id>         진단 로그 최근 50건 — 턴 시작 항목은 ptree-watch.py가 박동으로 읽는다
 //   tree:<root>          레거시 v1(통째 트리). migrate가 node: 행으로 바꾸고 지운다
@@ -178,7 +179,11 @@ export async function gc($: Any): Promise<void> {
   const gone = await readGone($, treeKey)
   for (const id of del) gone[id] = now
   for (const [id, at] of Object.entries(gone)) if (at < now - GONE_KEEP_MS) delete gone[id]
-  await $.store.set(goneKey(treeKey), gone)
+  try {
+    await $.store.set(goneKey(treeKey), gone)
+  } catch {
+    /* 기록 실패(store 가득 참 등)가 GC와 세션 시작을 끊지 않게 — 삭제가 오히려 공간을 비운다 */
+  }
   for (const id of del) {
     await $.store.delete(nodeKey(treeKey, id))
     delete nodes[id]
@@ -409,11 +414,43 @@ async function adoptFile(
     byTree.get(pre)![v.id] = v
     rows.push({ k, v, pre })
   }
-  const doomed = new Map<string, Set<string>>()
+  // 삭제 기록(gone)도 복제 상태의 일부다: 형제의 기록을 id별 최댓값으로 합쳐 내 것으로 삼는다.
+  // 합치지 않으면 제3의 식별자가 "GC한 쪽(행 없음)"과 "오래 쉰 쪽(낡은 사본)"을 함께 읽고 지운 노드를 되살린다.
   const gone = new Map<string, Record<string, number>>()
+  const goneOf = async (pre: string) => {
+    if (!gone.has(pre)) gone.set(pre, await readGone($, pre.slice('node:'.length, -1)))
+    return gone.get(pre)!
+  }
+  for (const [k, v] of Object.entries(data)) {
+    if (!k.startsWith('gone:') || !v || typeof v !== 'object' || Array.isArray(v)) continue
+    const treeKey = k.slice('gone:'.length)
+    const pre = nodePrefix(treeKey)
+    const mine = await goneOf(pre)
+    let changed = false
+    for (const [id, at] of Object.entries(v as Record<string, unknown>)) {
+      if (typeof at !== 'number' || !Number.isFinite(at)) continue
+      const t = Math.min(at, now)
+      if (mine[id] !== undefined && mine[id]! >= t) continue
+      mine[id] = t
+      changed = true
+      // 형제가 지운 노드의, 그 뒤로 안 바뀐 내 사본은 같이 지운다(안 그러면 한쪽에만 남는 좀비).
+      const key = pre + id
+      if (!own.has(key)) continue
+      const cur = (await $.store.get(key)) as PtreeNode | undefined
+      if (cur && rowVersion(cur) <= t) {
+        await $.store.delete(key)
+        own.delete(key)
+      }
+    }
+    if (changed) {
+      await $.store.set(goneKey(treeKey), mine)
+      own.add(goneKey(treeKey))
+    }
+  }
+  const doomed = new Map<string, Set<string>>()
   for (const [pre, nodes] of byTree) {
     doomed.set(pre, gcIds(nodes, now))
-    gone.set(pre, await readGone($, pre.slice('node:'.length, -1)))
+    await goneOf(pre)
   }
 
   for (const { k, v, pre } of rows) {
@@ -440,7 +477,8 @@ async function adoptFile(
     merged.history = merged.history.slice(-20)
     if (same(merged, cur)) continue
     await $.store.set(k, merged)
-    count++
+    // 버전 표기(modAt)만 맞춘 것은 "가져온 행"으로 세지 않는다(알릴 내용이 없다).
+    if (!same({ ...merged, modAt: 0 }, { ...cur, modAt: 0 })) count++
   }
 
   for (const [k, v] of Object.entries(data)) {

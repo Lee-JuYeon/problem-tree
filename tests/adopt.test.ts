@@ -388,6 +388,7 @@ test('C6: 합칠 것이 없으면(같은 내용) 쓰기 0 — 두 식별자가 �
   await start($)
   const wrote = store.sets.slice(before).filter(x => x.key.startsWith('node:')).map(x => x.key)
   expect(wrote).toEqual([nk('aaaa')]) // 버전(modAt)만 맞춘다
+  expect(store.toasts.filter(t => t.includes('가져왔습니다')).length).toBe(1) // 처음 2행만 — 버전 맞춤은 알리지 않는다
   const again = store.sets.length
   sibling(store, { ...rows, [nk('aaaa')]: row('aaaa', 'A', { modAt: T0 - 60_000 }) }, 3)
   await start($)
@@ -441,4 +442,43 @@ test('C9: mergeRows는 어느 쪽에서 합쳐도 같은 답(동률 포함) — 
     expect(mergeRows(ab, a)).toEqual(ab) // 고정점: 다시 합쳐도 그대로
     expect(mergeRows(ab, b)).toEqual(ab)
   }
+})
+
+test('C10: 삭제 기록(gone)도 형제끼리 합쳐진다 — 새 식별자가 "GC한 쪽"과 "오래 쉰 쪽"을 함께 읽어도 지운 노드가 안 살아난다', async ($, on) => {
+  const { store } = boot(on) // 새 식별자(빈 store)
+  store.files['problem-tree_leejuyeon-1.json'] = file({ 'store:id': 'L', [`gone:${ROOT}`]: { xxxx: T0 - HOUR }, [nk('keep')]: row('keep', 'KEEP') })
+  store.files[OLD] = file({ 'store:id': 'S', [nk('xxxx')]: row('xxxx', '지운 것') }) // 파일 순서와 무관해야 한다
+  await start($)
+  expect(nodeIds(store)).toEqual(['keep'])
+  expect(store.map.get(`gone:${ROOT}`)).toEqual({ xxxx: T0 - HOUR })
+})
+
+test('C11: 형제가 GC한 노드의 낡은 내 사본은 같이 지워지고, 그 뒤 내가 바꾼 사본은 남는다', async ($, on) => {
+  const { store } = boot(on, {
+    [nk('old1')]: row('old1', '낡은 사본'),
+    [nk('new1')]: row('new1', '그 뒤 손댐', { touchedAt: T0 - 60_000, modAt: T0 - 60_000 }),
+  })
+  sibling(store, { [`gone:${ROOT}`]: { old1: T0 - HOUR, new1: T0 - HOUR, bad: 'x' } }, 1)
+  await start($)
+  expect(nodeIds(store)).toEqual(['new1'])
+  expect(store.map.get(`gone:${ROOT}`)).toEqual({ old1: T0 - HOUR, new1: T0 - HOUR })
+})
+
+test('C12: store가 가득 차 삭제 기록을 못 써도 GC와 세션 시작은 끝까지 간다', async ($, on) => {
+  const { store } = boot(on, { [nk('dead')]: row('dead', '묘비', { status: 'removed', removedAt: T0 - 31 * DAY }) })
+  store.onSet = (k: string) => {
+    if (k.startsWith('gone:')) throw new Error('store would be over 4 MiB')
+  }
+  await start($)
+  expect(nodeIds(store)).toEqual([]) // GC는 됐다
+  expect(store.opens.length).toBe(1) // 패널도 열렸다
+  expect((store.map.get('diag:s1') as any[]).some(d => d.ev === 'sstart')).toBe(true) // 끝까지 갔다
+})
+
+test('C13: C10을 파일 순서를 뒤집어도 같다(낡은 사본을 먼저 읽고 삭제 기록을 나중에 읽음)', async ($, on) => {
+  const { store } = boot(on)
+  store.files[OLD] = file({ 'store:id': 'S', [nk('xxxx')]: row('xxxx', '지운 것') })
+  store.files['problem-tree_zzz-9.json'] = file({ 'store:id': 'L', [`gone:${ROOT}`]: { xxxx: T0 - HOUR }, [nk('keep')]: row('keep', 'KEEP') })
+  await start($)
+  expect(nodeIds(store)).toEqual(['keep'])
 })
